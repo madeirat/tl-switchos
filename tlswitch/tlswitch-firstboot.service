@@ -1,0 +1,21 @@
+[Unit]
+Description=TL-SwitchOS - installation au premier demarrage
+After=network-online.target systemd-user-sessions.service
+Wants=network-online.target
+Before=getty@tty1.service serial-getty@ttyS0.service
+ConditionPathExists=!/etc/tlswitch/.installe
+
+[Service]
+Type=oneshot
+ExecStart=/opt/tlswitch-install/premier-demarrage.sh
+StandardInput=tty-force
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TimeoutStartSec=0
+Environment=TERM=linux
+
+[Install]
+WantedBy=multi-user.target

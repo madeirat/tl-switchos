@@ -1,0 +1,15 @@
+# cle PRIVEE de signature des mises a jour : ne JAMAIS publier
+cles/
+*.pem
+# produits de construction
+*.iso
+*.iso.sha256
+*.tlsu
+*.tlsu.sha256
+build/
+__pycache__/
+*.pyc
+*.deb
+*.deb.sha256
+tlswitch/depot-apt.conf
+tlswitch/depot-apt.gpg

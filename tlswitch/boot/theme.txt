@@ -1,0 +1,49 @@
+# TL-SwitchOS - theme GRUB (TECH-LINUX)
+title-text: ""
+desktop-image: "grub-fond.png"
+desktop-image-scale-method: "stretch"
+desktop-color: "#0b1220"
+terminal-font: "DejaVu Sans Mono Regular 16"
+terminal-left: "10%"
+terminal-top: "38%"
+terminal-width: "80%"
+terminal-height: "50%"
+
++ boot_menu {
+  left = 24%
+  top = 44%
+  width = 52%
+  height = 33%
+  item_font = "DejaVu Sans Regular 19"
+  item_color = "#c9d4e8"
+  selected_item_font = "DejaVu Sans Bold 19"
+  selected_item_color = "#ffffff"
+  selected_item_pixmap_style = "select_*.png"
+  item_height = 40
+  item_padding = 16
+  item_spacing = 6
+  icon_width = 0
+  icon_height = 0
+  scrollbar = false
+}
+
++ label {
+  top = 82%
+  left = 0
+  width = 100%
+  align = "center"
+  font = "DejaVu Sans Regular 16"
+  color = "#8fa0bd"
+  text = "Flèches : choisir   ·   Entrée : démarrer   ·   e : modifier"
+}
+
++ label {
+  id = "__timeout__"
+  top = 86%
+  left = 0
+  width = 100%
+  align = "center"
+  font = "DejaVu Sans Regular 16"
+  color = "#22d3ee"
+  text = "Démarrage automatique dans %d s"
+}
