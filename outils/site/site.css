@@ -105,3 +105,46 @@ h2{font-size:clamp(1.6rem,3.4vw,2.2rem);letter-spacing:-.025em;margin:0 0 10px;t
   .console pre{font-size:.74rem}
   .bloc{padding-top:64px}
 }
+
+/* pages de documentation */
+nav a[aria-current="page"]{color:var(--text);background:rgba(59,130,246,.14)}
+.suite{text-align:center;margin:24px 0 0}
+.pied-liens{display:inline-flex;gap:18px;flex-wrap:wrap}
+.doc-tete{position:relative;overflow:hidden;padding:72px 0 28px;border-bottom:1px solid var(--line)}
+.doc-tete::before{content:"";position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse 55% 80% at 50% 0%,rgba(59,130,246,.2),transparent 70%)}
+.doc-tete .largeur{position:relative}
+.doc-tete h1{font-size:clamp(2rem,5vw,3rem);margin:0 0 12px}
+.doc-tete .chapo{margin:0;max-width:62ch}
+.doc{padding-top:24px}
+.doc-groupe{padding-top:40px}
+.doc-groupe h2,.texte h2,.version h2{text-align:left}
+.doc-groupe>.muet{margin:0 0 16px}
+.texte{max-width:820px}
+.texte h2{margin-top:44px;font-size:1.45rem}
+.texte p,.texte li{color:#c9d3e3}
+.texte li{margin:6px 0}
+.texte pre,.doc pre{background:#03050a;border:1px solid var(--line2);border-radius:12px;padding:16px 18px;overflow-x:auto;font-size:.84rem;line-height:1.55;color:#cfd8e8}
+.texte code,.tableau code{background:rgba(255,255,255,.06);border-radius:5px;padding:1px 6px;font-size:.88em}
+.texte pre code{background:none;padding:0}
+.tableau{width:100%;border-collapse:collapse;font-size:.92rem;margin:8px 0 16px}
+.tableau th{text-align:left;color:var(--muted);font-weight:600;padding:10px 12px;border-bottom:1px solid var(--line2)}
+.tableau td{padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+.tableau tr:hover td{background:rgba(255,255,255,.02)}
+.commandes td:first-child{white-space:nowrap}
+.commandes td:last-child{color:var(--muted)}
+.filtre{position:sticky;top:68px;z-index:2;padding:16px 0 8px;background:linear-gradient(var(--bg) 70%,transparent)}
+.filtre input{width:100%;font:inherit;padding:12px 16px;border-radius:10px;border:1px solid var(--line2);background:var(--panel);color:var(--text)}
+.filtre input:focus{outline:none;border-color:var(--blue2)}
+.version{padding-top:8px;border-bottom:1px solid var(--line)}
+.badge{font-size:.72rem;vertical-align:middle;padding:3px 9px;border-radius:999px;background:rgba(34,197,94,.14);color:var(--green);border:1px solid rgba(34,197,94,.35);font-weight:600}
+@media (max-width:860px){
+  .barre-in{height:auto;flex-wrap:wrap;padding-top:10px;padding-bottom:10px}
+  nav{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
+}
+@media (max-width:600px){
+  nav a:not(.nav-gh){display:inline-flex}
+  .commandes td:first-child{white-space:normal;word-break:break-word}
+  .tableau{font-size:.85rem}
+  .tableau td,.tableau th{padding:8px 6px}
+  .filtre{top:96px}
+}

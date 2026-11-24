@@ -19,3 +19,22 @@ document.addEventListener("click", function (ev) {
     document.body.removeChild(t);
   }
 });
+
+// page Commandes : filtre en direct
+(function () {
+  var f = document.getElementById("filtre");
+  if (!f) return;
+  f.addEventListener("input", function () {
+    var q = f.value.trim().toLowerCase();
+    document.querySelectorAll(".commandes").forEach(function (tab) {
+      var vus = 0;
+      tab.querySelectorAll("tr").forEach(function (tr, i) {
+        if (i === 0) return;
+        var ok = !q || tr.textContent.toLowerCase().indexOf(q) >= 0;
+        tr.style.display = ok ? "" : "none";
+        if (ok) vus++;
+      });
+      tab.closest(".doc-groupe").style.display = vus ? "" : "none";
+    });
+  });
+})();

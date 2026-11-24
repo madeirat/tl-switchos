@@ -14,7 +14,7 @@
 - **Export Prometheus** sur le port 9101 (trafic, paquets, erreurs, rejets, état STP, MAC apprises, err-disabled par port), avec liste de réseaux autorisés. Lisible aussi par Zabbix.
 - Correction : `username <nom> password-change-required` sur un compte inconnu plantait au lieu d'afficher l'erreur.
 - Le paquet Debian dépend maintenant de `nftables`, `rsyslog` et `libpam-radius-auth`.
-- Site : `robots.txt` et `sitemap.xml` générés avec le domaine du site. Le dépôt APT demande aux moteurs de recherche de ne pas l'indexer.
+- Téléchargements : seule la dernière ISO reste sur le dépôt (les anciennes versions du paquet restent dans le dépôt APT et les Releases GitHub).
 
 ## 1.0.2
 

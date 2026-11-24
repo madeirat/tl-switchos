@@ -26,8 +26,24 @@ mkdir -p "$CACHE" "$WWW"; install -d -m 700 "$CLES"
 cd "$DEPOT"
 VERSION=$(python3 tlswitch/tlswitch.py version)
 TAG="v$VERSION"
+# site vitrine : archive signee (cle du depot), recuperee et verifiee par le serveur web.
+# Archive reproductible : meme contenu = meme empreinte, le serveur web ne republie que si ca change.
+site() {
+  local S="$CACHE/site" A="$WWW/site/site.tar.gz"
+  rm -rf "$S"
+  python3 outils/site/generer-site.py "$DEPOT" "$S" "$DEPOT_URL" "$GH_REPO" --telechargements "$WWW/telechargements"
+  mkdir -p "$WWW/site"
+  tar --sort=name --owner=0 --group=0 --numeric-owner --mtime='@0' -cf - -C "$S" . | gzip -9n > "$A.tmp"
+  if [ -f "$A" ] && [ -f "$A.sig" ] && cmp -s "$A.tmp" "$A"; then rm -f "$A.tmp"; return 0; fi
+  mv "$A.tmp" "$A"
+  bash outils/depot-apt.sh signer "$CLES" "$A"
+  log "site vitrine signe : $DEPOT_URL/site/site.tar.gz"
+}
+
 if gh release view "$TAG" >/dev/null 2>&1; then
-  log "$TAG deja publiee, rien a faire"; exit 0
+  # version deja publiee : seul le site suit le code (pages, notes de version)
+  [ -s "$CLES/depot-apt.gpg" ] && site
+  log "$TAG deja publiee, rien d'autre a faire"; exit 0
 fi
 log "nouvelle version $VERSION : construction"
 
@@ -77,19 +93,12 @@ if [ -n "$DEB" ]; then
   log "depot APT a jour : $DEPOT_URL"
 fi
 
-# telechargements (3 dernieres ISO) dans le depot du projet
+# telechargements : seulement la derniere ISO (les anciennes versions restent dans le depot APT et les Releases)
 T="$WWW/telechargements"; mkdir -p "$T"
 cp -f "$ISO" "$ISO.sha256" "$T/"
-ls "$T"/TL-SwitchOS-*-amd64.iso 2>/dev/null | sort -V | head -n -3 | while read -r v; do rm -f "$v" "$v.sha256"; done
+ls "$T"/TL-SwitchOS-*-amd64.iso 2>/dev/null | sort -V | head -n -1 | while read -r v; do rm -f "$v" "$v.sha256"; done
 
-# site vitrine : archive signee (cle du depot), recuperee et verifiee par le serveur web
-S="$CACHE/site"; rm -rf "$S"
-python3 outils/site/generer-site.py "$DEPOT" "$S" "$DEPOT_URL" "$GH_REPO" --telechargements "$T"
-mkdir -p "$WWW/site"
-tar czf "$WWW/site/site.tar.gz.tmp" --owner=0 --group=0 --sort=name -C "$S" .
-mv "$WWW/site/site.tar.gz.tmp" "$WWW/site/site.tar.gz"
-bash outils/depot-apt.sh signer "$CLES" "$WWW/site/site.tar.gz"
-log "site vitrine signe : $DEPOT_URL/site/site.tar.gz"
+site
 
 # copie optionnelle sur GitHub Pages (depot APT + site, sans les ISO)
 if [ -n "$DEB" ] && [ "${PUBLIER_PAGES:-non}" = oui ]; then
