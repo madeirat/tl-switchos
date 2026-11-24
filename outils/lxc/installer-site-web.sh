@@ -98,6 +98,20 @@ tar -tzf "$T/site.tar.gz" | grep -Eq '(^/|(^|/)\.\.(/|$))' && { echo "archive re
 mkdir "$T/x"
 tar -xzf "$T/site.tar.gz" -C "$T/x" --no-same-owner --no-same-permissions
 [ -f "$T/x/index.html" ] || { echo "archive refusee : pas de index.html"; exit 1; }
+# referencement : robots.txt et sitemap.xml avec le vrai domaine du site
+J=$(date -u +%F)
+printf 'User-agent: *\nAllow: /\nSitemap: https://%s/sitemap.xml\n' "$DOMAINE" > "$T/x/robots.txt"
+cat > "$T/x/sitemap.xml" <<EOX
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://$DOMAINE/</loc>
+    <lastmod>$J</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>1.0</priority>
+  </url>
+</urlset>
+EOX
 rsync -rt --delete --delay-updates --chmod=D755,F644 "$T/x/" "$DOC/"
 echo "$N" > "$E/empreinte"
 echo "site $P publie ($(date '+%F %T'))"

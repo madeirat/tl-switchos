@@ -77,6 +77,19 @@ EOS
 systemctl enable tlswitch-ecran.service >/dev/null 2>&1 || true
 systemctl restart tlswitch-ecran.service >/dev/null 2>&1 || true
 
+# export Prometheus (active seulement par "prometheus exporter" dans la config)
+cat > /etc/systemd/system/tlswitch-metrics.service <<'EOS'
+[Unit]
+Description=TL-SwitchOS - export Prometheus (compteurs des ports, STP, securite)
+After=tlswitch.service
+[Service]
+ExecStart=/usr/local/sbin/tlswitch metrics
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOS
+
 # le systeme s'affiche comme TL-SwitchOS (pas Debian)
 [ -f "$LIB/marque.sh" ] && bash "$LIB/marque.sh" || true
 

@@ -103,7 +103,7 @@ Le projet fournit dans son dépôt une recette (script bash). La construction la
 | Constructions | lancées par l'utilisateur système `construction` (sans shell ni droits), dans un service systemd cloisonné : système en lecture seule, écriture limitée au dossier du projet et à son dépôt, pas d'élévation de privilèges, `/tmp` privé. `construction lancer` passe toujours par ce service, même lancé en root. |
 | Clés | dossier `cles` en `700`, dans `/srv/construction/projets` (`750`) que nginx ne peut pas lire ; sauvegarde chiffrée en AES-256. |
 | Jeton GitHub | `/etc/construction/<projet>.conf` (`640`, root et `construction`), donné à git par l'environnement, jamais écrit dans `.git/config`. |
-| nginx | GET/HEAD seulement, pas de liste des dossiers, version masquée, fichiers cachés refusés. |
+| nginx | GET/HEAD seulement, liste des dossiers comme un miroir Debian (tout y est public et signé), version masquée, fichiers cachés refusés. |
 | Site | archive signée avec la clé du dépôt, vérifiée par `gpgv` avec une clé épinglée. Liens, fichiers spéciaux et chemins `..` refusés. Récupération par un compte sans droits, dans un service cloisonné. Apache : proxy seulement, GET/HEAD, CSP stricte, HSTS. |
 | Système | mises à jour de sécurité Debian automatiques (`unattended-upgrades`). Postfix et rpcbind arrêtés. |
 

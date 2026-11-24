@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 TL-SwitchOS - transforme une machine Linux (Debian) a plusieurs ports Ethernet
-en switch administrable de niveau 2 (VLAN 802.1Q, LACP, STP/RSTP, LLDP, SVI).
+en switch administrable de niveau 2 (VLAN 802.1Q, LACP, STP/RSTP, LLDP, SVI,
+port security, DHCP snooping, IGMP snooping, storm control, SPAN, SNMPv3, syslog,
+RADIUS, sauvegarde SCP, export Prometheus).
 
 Un seul fichier, uniquement la bibliotheque standard de Python 3.
 
@@ -14,6 +16,8 @@ Un seul fichier, uniquement la bibliotheque standard de Python 3.
   tlswitch rollback                       retour arriere immediat
   tlswitch upgrade [--verifier] [--force] [--sans-signature] <paquet.tlsu | usbflash0:NOM | http://...>
   tlswitch upgrade --retour               revenir a la version precedente du logiciel
+  tlswitch archive                        sauvegarde de la config maintenant (archive path)
+  tlswitch metrics                        serveur d'export Prometheus (service tlswitch-metrics)
 
 Projet TECH-LINUX.
 """
@@ -30,7 +34,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 
 ETC = os.environ.get("TLSWITCH_ETC", "/etc/tlswitch")
 RUN = os.environ.get("TLSWITCH_RUN", "/run/tlswitch")
@@ -244,6 +248,13 @@ class Port:
         self.portfast = False
         self.bpduguard = False
         self.mtu = None
+        self.ps = False              # switchport port-security
+        self.ps_max = 1
+        self.ps_macs = []
+        self.ps_violation = "shutdown"
+        self.ps_aging = 0            # minutes, 0 = jamais
+        self.dhcp_trust = False
+        self.storm = {}              # broadcast|multicast -> paquets/s
 
 
 class Svi:
@@ -275,6 +286,26 @@ class Model:
         self.http = True
         self.ssh = True
         self.banner = ""
+        self.snmp_contact = ""
+        self.snmp_users = {}       # nom -> [sha|sha256|sha512, cle auth, aes|aes256|None, cle priv]
+        self.log_hosts = []        # [ip, udp|tcp, port]
+        self.log_level = "informational"
+        self.radius = []           # [ip, port, cle]
+        self.radius_timeout = 3
+        self.aaa_radius = False
+        self.dhcp_snooping = False
+        self.dhcp_snooping_vlans = set()   # vide = toutes
+        self.igmp_snooping = True
+        self.igmp_querier = False
+        self.monitor = {}          # n -> {"src": {port: rx|tx|both}, "dst": port ou None}
+        self.archive_path = None
+        self.archive_period = 0    # minutes
+        self.archive_write = False
+        self.archive_max = 10
+        self.errdisable_recovery = 0
+        self.prom = False
+        self.prom_port = 9101
+        self.prom_allow = []
 
     @property
     def physical(self):
@@ -288,9 +319,14 @@ class Model:
         n = int(po[2:])
         return [p for p in self.physical if self.ports[p].channel_group == n]
 
+    def span_dsts(self):
+        return {s["dst"] for s in self.monitor.values() if s.get("dst")}
+
     def bridge_ports(self):
-        """Ports qui sont dans le bridge : physiques hors agregat + port-channels."""
-        return [p for p in self.physical if self.ports[p].channel_group is None] + self.channels
+        """Ports qui sont dans le bridge : physiques hors agregat + port-channels
+        (une destination SPAN sort du bridge : elle ne recoit que la copie du trafic)."""
+        dst = self.span_dsts()
+        return [p for p in self.physical if self.ports[p].channel_group is None and p not in dst] + self.channels
 
     def port_vlans(self, name):
         """{vid: untagged(bool)}, pvid"""
@@ -311,7 +347,10 @@ class Model:
         if self.enable_secret:
             L.append("enable secret 5 %s" % self.enable_secret)
         for u in sorted(self.users):
-            L.append("username %s privilege %d secret 5 %s" % (u, self.users[u][0], self.users[u][1]))
+            if self.users[u][1] is None:
+                L.append("username %s privilege %d radius" % (u, self.users[u][0]))
+            else:
+                L.append("username %s privilege %d secret 5 %s" % (u, self.users[u][0], self.users[u][1]))
             if u in self.must_change:
                 L.append("username %s password-change-required" % u)
         if self.banner:
@@ -335,6 +374,46 @@ class Model:
             L.append("snmp-server community %s ro" % self.snmp_community)
         if self.snmp_location:
             L.append("snmp-server location %s" % self.snmp_location)
+        if self.snmp_contact:
+            L.append("snmp-server contact %s" % self.snmp_contact)
+        for u in sorted(self.snmp_users):
+            a, ka, p, kp = self.snmp_users[u]
+            L.append("snmp-server user %s auth %s %s%s" % (u, a, ka, " priv %s %s" % (p, kp) if p else ""))
+        for ip, proto, port in self.log_hosts:
+            L.append("logging host %s%s" % (ip, "" if (proto, port) == ("udp", 514)
+                                            else " transport %s port %d" % (proto, port)))
+        if self.log_level != "informational":
+            L.append("logging trap %s" % self.log_level)
+        for ip, port, key in self.radius:
+            L.append("radius-server host %s%s key %s" % (ip, "" if port == 1812 else " auth-port %d" % port, key))
+        if self.radius_timeout != 3:
+            L.append("radius-server timeout %d" % self.radius_timeout)
+        if self.aaa_radius:
+            L.append("aaa authentication login default group radius local")
+        if not self.igmp_snooping:
+            L.append("no ip igmp snooping")
+        if self.igmp_querier:
+            L.append("ip igmp snooping querier")
+        if self.dhcp_snooping:
+            L.append("ip dhcp snooping")
+            if self.dhcp_snooping_vlans:
+                L.append("ip dhcp snooping vlan %s" % fmt_vlan_list(self.dhcp_snooping_vlans))
+        if self.errdisable_recovery:
+            L.append("errdisable recovery interval %d" % self.errdisable_recovery)
+        if self.archive_path:
+            L.append("archive path %s" % self.archive_path)
+        if self.archive_write:
+            L.append("archive write-memory")
+        if self.archive_period:
+            L.append("archive time-period %d" % self.archive_period)
+        if self.archive_max != 10:
+            L.append("archive maximum %d" % self.archive_max)
+        if self.prom:
+            L.append("prometheus exporter")
+            if self.prom_port != 9101:
+                L.append("prometheus exporter port %d" % self.prom_port)
+            for n in self.prom_allow:
+                L.append("prometheus exporter allow %s" % n)
         L.append("!")
         for name in self.channels + self.physical:
             p = self.ports[name]
@@ -357,6 +436,21 @@ class Model:
                     L.append(" spanning-tree portfast")
                 if p.bpduguard:
                     L.append(" spanning-tree bpduguard enable")
+                if p.ps:
+                    L.append(" switchport port-security")
+                if p.ps_max != 1:
+                    L.append(" switchport port-security maximum %d" % p.ps_max)
+                for mac in p.ps_macs:
+                    L.append(" switchport port-security mac-address %s" % mac)
+                if p.ps_violation != "shutdown":
+                    L.append(" switchport port-security violation %s" % p.ps_violation)
+                if p.ps_aging:
+                    L.append(" switchport port-security aging time %d" % p.ps_aging)
+                if p.dhcp_trust:
+                    L.append(" ip dhcp snooping trust")
+                for k in ("broadcast", "multicast"):
+                    if k in p.storm:
+                        L.append(" storm-control %s level pps %d" % (k, p.storm[k]))
             if p.mtu:
                 L.append(" mtu %d" % p.mtu)
             if p.shutdown:
@@ -374,6 +468,14 @@ class Model:
                 L.append(" ip address %s %s" % (i.ip, i.netmask) if i.version == 4 else " ipv6 address %s" % a)
             if s.shutdown:
                 L.append(" shutdown")
+            L.append("!")
+        for n in sorted(self.monitor):
+            sess = self.monitor[n]
+            for src in sorted(sess["src"], key=natural_key):
+                L.append("monitor session %d source interface %s %s" % (n, disp_if(src, True), sess["src"][src]))
+            if sess.get("dst"):
+                L.append("monitor session %d destination interface %s" % (n, disp_if(sess["dst"], True)))
+        if self.monitor:
             L.append("!")
         if self.gateway:
             L.append("ip default-gateway %s" % self.gateway)
@@ -497,6 +599,10 @@ KW_HELP = {
     "banner": "Banniere", "running-config": "Configuration active", "address": "Adresse IP",
     "default-gateway": "Passerelle", "name-server": "DNS", "trunk": "Mode trunk", "access": "Mode access",
     "http": "Interface web", "ssh": "SSH", "mode": "Mode", "secret": "Mot de passe", "do": "Commande exec",
+    "logging": "Syslog distant", "radius-server": "Serveur RADIUS", "aaa": "Authentification",
+    "monitor": "Port mirroring (SPAN)", "port-security": "Securite du port", "dhcp": "DHCP snooping",
+    "igmp": "IGMP snooping", "storm-control": "Limitation des tempetes", "errdisable": "Ports err-disabled",
+    "prometheus": "Export Prometheus", "test": "Tester", "radius": "Compte RADIUS",
 }
 
 EXEC = Grammar()
@@ -734,7 +840,9 @@ def c_username(s, name, priv, secret):
 @CONF.add("username <nom> password-change-required", "Mot de passe provisoire : a changer a la connexion")
 def c_username_mc(s, name):
     if name not in s.m.users:
-        raise CliError("% Compte inconnu : %s" % name)
+        raise CliError("%% Compte inconnu : %s" % name)
+    if s.m.users[name][1] is None:
+        raise CliError("% Compte RADIUS : le mot de passe est gere par l'annuaire")
     s.m.must_change.add(name)
 
 
@@ -743,11 +851,30 @@ def c_username1(s, name, secret):
     c_username(s, name, "1", secret)
 
 
+def local_admins(m):
+    """Comptes niveau 15 avec un mot de passe local (secours si le RADIUS ne repond plus)."""
+    return [n for n, u in m.users.items() if u[0] == 15 and u[1] is not None]
+
+
+@CONF.add("username <nom> privilege <1|15> radius", "Compte verifie par le serveur RADIUS (annuaire AD)")
+def c_username_radius(s, name, priv):
+    if not re.fullmatch(r"[a-z_][a-z0-9_.-]{0,30}", name):
+        raise CliError("% Nom de compte invalide (minuscules, chiffres, . - _)")
+    if name in ("root", "daemon", "bin", "sys", "www-data", "sshd", "nobody"):
+        raise CliError("% Nom reserve")
+    priv = int(priv)
+    if priv not in (1, 15):
+        raise CliError("% privilege 1 (lecture) ou 15 (admin)")
+    if local_admins(s.m) == [name]:
+        raise CliError("% Impossible : garde au moins un compte niveau 15 avec un mot de passe local")
+    s.m.users[name] = [priv, None]
+    s.m.must_change.discard(name)
+
+
 @CONF.add("no username <nom>", "Supprimer un compte")
 def c_no_username(s, name):
-    if name in s.m.users and s.m.users[name][0] == 15 and \
-            sum(1 for u in s.m.users.values() if u[0] == 15) == 1:
-        raise CliError("% Impossible : c'est le dernier compte niveau 15")
+    if name in s.m.users and s.m.users[name][0] == 15 and local_admins(s.m) == [name]:
+        raise CliError("% Impossible : c'est le dernier compte niveau 15 avec un mot de passe local")
     s.m.users.pop(name, None)
     s.m.must_change.discard(name)
 
@@ -823,6 +950,390 @@ def c_end(s):
 @CONF.add("exit", "Retour au niveau precedent")
 def c_exit(s):
     s.mode, s.ctx = "exec", None
+
+
+# --- SNMPv3, syslog distant ----------------------------------------------------
+
+SNMP_AUTH = ("sha", "sha256", "sha512")
+SNMP_PRIV = ("aes", "aes256")
+
+
+@CONF.add("snmp-server contact <...>", "Contact SNMP")
+def c_snmp_contact(s, text):
+    s.m.snmp_contact = text.strip()[:100]
+
+
+@CONF.add("snmp-server user <nom> <...>", "Utilisateur SNMPv3 : auth sha256 <cle> priv aes <cle>")
+def c_snmp_user(s, name, rest):
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,32}", name):
+        raise CliError("% Nom d'utilisateur SNMP invalide")
+    w = rest.split()
+    # accepte aussi la forme longue : snmp-server user NOM GROUPE v3 auth sha CLE priv aes 128 CLE
+    low = [x.lower() for x in w]
+    if "auth" not in low:
+        raise CliError("% Syntaxe : snmp-server user <nom> auth <sha|sha256|sha512> <cle> [priv <aes|aes256> <cle>]")
+    i = low.index("auth")
+    try:
+        algo, ka = low[i + 1], w[i + 2]
+    except IndexError:
+        raise CliError("% Cle d'authentification manquante")
+    if algo in ("sha1",):
+        algo = "sha"
+    if algo == "md5":
+        raise CliError("% MD5 refuse (trop faible) : sha256 conseille")
+    if algo not in SNMP_AUTH:
+        raise CliError("% Authentification : sha, sha256 ou sha512")
+    p, kp = None, None
+    if "priv" in low:
+        j = low.index("priv")
+        rest_p = w[j + 1:]
+        if not rest_p:
+            raise CliError("% Chiffrement manquant")
+        p = rest_p[0].lower()
+        rest_p = rest_p[1:]
+        if p == "aes" and rest_p and rest_p[0] in ("128", "192", "256"):
+            p = "aes256" if rest_p[0] == "256" else "aes"
+            if rest_p[0] == "192":
+                raise CliError("% AES 192 non pris en charge : aes (128) ou aes256")
+            rest_p = rest_p[1:]
+        if p in ("des", "3des"):
+            raise CliError("% DES refuse (trop faible) : aes")
+        if p not in SNMP_PRIV or not rest_p:
+            raise CliError("% Chiffrement : priv aes <cle> ou priv aes256 <cle>")
+        kp = rest_p[0]
+    for k in (ka, kp):
+        if k is not None and (len(k) < 8 or '"' in k or "\\" in k):
+            raise CliError("% Cle SNMP : 8 caracteres minimum, sans guillemet ni antislash")
+    s.m.snmp_users[name] = [algo, ka, p, kp]
+
+
+@CONF.add("no snmp-server user <nom>", "Supprimer un utilisateur SNMPv3")
+def c_no_snmp_user(s, name):
+    s.m.snmp_users.pop(name, None)
+
+
+@CONF.add("no snmp-server community", "Supprimer la communaute v2c (garder SNMPv3)")
+def c_no_snmp_comm(s):
+    s.m.snmp_community = None
+
+
+LOG_LEVELS = ("emergencies", "alerts", "critical", "errors", "warnings", "notifications",
+              "informational", "debugging")
+RSYSLOG_LEVEL = dict(zip(LOG_LEVELS, ("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug")))
+
+
+def _check_ip(ip):
+    try:
+        return str(ipaddress.ip_address(ip))
+    except ValueError:
+        raise CliError("%% Adresse IP invalide : %s" % ip)
+
+
+def _log_host(s, ip, proto="udp", port="514"):
+    ip = _check_ip(ip)
+    proto = proto.lower()
+    if proto not in ("udp", "tcp"):
+        raise CliError("% transport udp ou tcp")
+    port = int(port)
+    if not 1 <= port <= 65535:
+        raise CliError("% Port 1-65535")
+    s.m.log_hosts = [h for h in s.m.log_hosts if h[0] != ip] + [[ip, proto, port]]
+    if len(s.m.log_hosts) > 4:
+        raise CliError("% 4 serveurs syslog maximum")
+
+
+@CONF.add("logging host <ip>", "Serveur syslog distant (UDP 514)")
+def c_log_host(s, ip):
+    _log_host(s, ip)
+
+
+@CONF.add("logging host <ip> transport <udp|tcp> port <port>", "Serveur syslog distant (UDP ou TCP)")
+def c_log_host2(s, ip, proto, port):
+    _log_host(s, ip, proto, port)
+
+
+@CONF.add("no logging host <ip>", "Retirer un serveur syslog")
+def c_no_log_host(s, ip):
+    s.m.log_hosts = [h for h in s.m.log_hosts if h[0] != ip]
+
+
+@CONF.add("logging trap <niveau>", "Niveau envoye au syslog (informational par defaut)")
+def c_log_trap(s, lvl):
+    if lvl.isdigit() and int(lvl) < 8:
+        lvl = LOG_LEVELS[int(lvl)]
+    full = [x for x in LOG_LEVELS if x.startswith(lvl.lower())]
+    if len(full) != 1:
+        raise CliError("% Niveau : " + ", ".join(LOG_LEVELS))
+    s.m.log_level = full[0]
+
+
+@CONF.add("no logging trap", "Niveau par defaut (informational)")
+def c_no_log_trap(s):
+    s.m.log_level = "informational"
+
+
+# --- RADIUS (connexion des administrateurs par l'annuaire) --------------------
+
+def _radius_key(key):
+    if not re.fullmatch(r"[\x21-\x7e]{8,64}", key):
+        raise CliError("% Cle RADIUS : 8 a 64 caracteres imprimables, sans espace")
+    return key
+
+
+def _radius_host(s, ip, port, key):
+    ip = _check_ip(ip)
+    port = int(port)
+    if not 1 <= port <= 65535:
+        raise CliError("% Port 1-65535")
+    s.m.radius = [r for r in s.m.radius if r[0] != ip] + [[ip, port, _radius_key(key)]]
+    if len(s.m.radius) > 3:
+        raise CliError("% 3 serveurs RADIUS maximum")
+
+
+@CONF.add("radius-server host <ip> key <cle>", "Serveur RADIUS (ex : NPS de l'annuaire AD)")
+def c_radius(s, ip, key):
+    _radius_host(s, ip, 1812, key)
+
+
+@CONF.add("radius-server host <ip> auth-port <port> key <cle>", "Serveur RADIUS sur un autre port")
+def c_radius2(s, ip, port, key):
+    _radius_host(s, ip, port, key)
+
+
+@CONF.add("no radius-server host <ip>", "Retirer un serveur RADIUS")
+def c_no_radius(s, ip):
+    s.m.radius = [r for r in s.m.radius if r[0] != ip]
+
+
+@CONF.add("radius-server timeout <1-30>", "Delai de reponse RADIUS (secondes)")
+def c_radius_to(s, n):
+    n = int(n)
+    if not 1 <= n <= 30:
+        raise CliError("% 1 a 30 secondes")
+    s.m.radius_timeout = n
+
+
+@CONF.add("aaa authentication login default group radius local",
+          "Connexion SSH et web par RADIUS, comptes locaux en secours")
+def c_aaa(s):
+    s.m.aaa_radius = True
+
+
+@CONF.add("no aaa authentication login default", "Comptes locaux uniquement")
+def c_no_aaa(s):
+    s.m.aaa_radius = False
+
+
+@CONF.add("aaa new-model", "Accepte")
+def c_aaa_nm(s):
+    pass
+
+
+# --- DHCP snooping, IGMP snooping, err-disable --------------------------------
+
+@CONF.add("ip dhcp snooping", "Bloquer les serveurs DHCP pirates (ports non 'trust')")
+def c_dhcps(s):
+    s.m.dhcp_snooping = True
+
+
+@CONF.add("ip dhcp snooping vlan <liste>", "Limiter le DHCP snooping a ces VLAN")
+def c_dhcps_vlan(s, lst):
+    s.m.dhcp_snooping_vlans |= parse_vlan_list(lst)
+
+
+@CONF.add("no ip dhcp snooping vlan <liste>", "Retirer des VLAN du DHCP snooping")
+def c_no_dhcps_vlan(s, lst):
+    s.m.dhcp_snooping_vlans -= parse_vlan_list(lst)
+
+
+@CONF.add("no ip dhcp snooping", "Desactiver le DHCP snooping")
+def c_no_dhcps(s):
+    s.m.dhcp_snooping = False
+
+
+@CONF.add("ip igmp snooping", "IGMP snooping (actif par defaut)")
+def c_igmp(s):
+    s.m.igmp_snooping = True
+
+
+@CONF.add("no ip igmp snooping", "Desactiver l'IGMP snooping (le multicast est diffuse partout)")
+def c_no_igmp(s):
+    s.m.igmp_snooping = False
+    s.m.igmp_querier = False
+
+
+@CONF.add("ip igmp snooping querier", "Le switch joue le querier (reseau sans routeur multicast)")
+def c_igmp_q(s):
+    s.m.igmp_snooping = True
+    s.m.igmp_querier = True
+
+
+@CONF.add("no ip igmp snooping querier", "")
+def c_no_igmp_q(s):
+    s.m.igmp_querier = False
+
+
+@CONF.add("errdisable recovery interval <30-86400>", "Reactiver seul un port err-disabled apres N secondes")
+def c_errrec(s, n):
+    n = int(n)
+    if not 30 <= n <= 86400:
+        raise CliError("% 30 a 86400 secondes")
+    s.m.errdisable_recovery = n
+
+
+@CONF.add("no errdisable recovery interval", "Pas de reactivation automatique")
+def c_no_errrec(s):
+    s.m.errdisable_recovery = 0
+
+
+# --- SPAN (port mirroring) ------------------------------------------------------
+
+def _mon(s, n):
+    n = int(n)
+    if not 1 <= n <= 4:
+        raise CliError("% Session 1-4")
+    return n, s.m.monitor.setdefault(n, {"src": {}, "dst": None})
+
+
+@CONF.add("monitor session <1-4> source interface <...>", "Port(s) a copier : ... [rx|tx|both]")
+def c_mon_src(s, n, text):
+    w = text.split()
+    d = "both"
+    if w and w[-1].lower() in ("rx", "tx", "both"):
+        d = w.pop().lower()
+    names = expand_if_range(" ".join(w), s.m.ports)
+    n, sess = _mon(s, n)
+    for x in names:
+        if x not in s.m.ports or x.startswith("vlan"):
+            raise CliError("% Source : un port ou un Port-channel")
+        if x in s.m.span_dsts():
+            raise CliError("%% %s est deja une destination SPAN" % disp_if(x))
+        sess["src"][x] = d
+
+
+@CONF.add("monitor session <1-4> destination interface <if>", "Port qui recoit la copie (sonde, Wireshark)")
+def c_mon_dst(s, n, text):
+    x = canon_if(text)
+    if not x.startswith("ge") or x not in s.m.ports:
+        raise CliError("% Destination : un port physique")
+    if s.m.ports[x].channel_group is not None:
+        raise CliError("% Destination : pas un membre d'agregat")
+    n, sess = _mon(s, n)
+    for k, o in s.m.monitor.items():
+        if x in o["src"] or (k != n and o.get("dst") == x):
+            raise CliError("%% %s est deja utilise par la session %d" % (disp_if(x), k))
+    sess["dst"] = x
+
+
+@CONF.add("no monitor session <1-4>", "Supprimer une session SPAN")
+def c_no_mon(s, n):
+    s.m.monitor.pop(int(n), None)
+
+
+# --- sauvegarde automatique (archive) -----------------------------------------
+
+def parse_scp_url(url):
+    """scp://compte@hote[:port]/dossier -> (compte, hote, port, dossier)"""
+    mo = re.fullmatch(r"scp://([A-Za-z0-9._-]{1,32})@(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9.-]{1,253})(?::(\d{1,5}))?(/[A-Za-z0-9._/~-]*)?", url)
+    if not mo:
+        raise CliError("% Adresse : scp://compte@serveur[:port]/dossier")
+    port = int(mo.group(3) or 22)
+    if not 1 <= port <= 65535:
+        raise CliError("% Port 1-65535")
+    path = mo.group(4) or "/"
+    if ".." in path.split("/"):
+        raise CliError("% Chemin invalide")
+    if path.startswith("/~/"):
+        path = path[3:] or "."
+    return mo.group(1), mo.group(2).strip("[]"), port, path
+
+
+@CONF.add("archive path <url>", "Sauvegarde vers scp://compte@serveur/dossier (NAS)")
+def c_arch_path(s, url):
+    parse_scp_url(url)
+    s.m.archive_path = url
+
+
+@CONF.add("no archive path", "Sauvegardes locales uniquement")
+def c_no_arch_path(s):
+    s.m.archive_path = None
+
+
+@CONF.add("archive write-memory", "Sauvegarder a chaque write memory")
+def c_arch_wm(s):
+    s.m.archive_write = True
+
+
+@CONF.add("no archive write-memory", "")
+def c_no_arch_wm(s):
+    s.m.archive_write = False
+
+
+@CONF.add("archive time-period <minutes>", "Sauvegarde periodique (si la config a change)")
+def c_arch_tp(s, n):
+    n = int(n)
+    if not 10 <= n <= 525600:
+        raise CliError("% 10 a 525600 minutes")
+    s.m.archive_period = n
+
+
+@CONF.add("no archive time-period", "")
+def c_no_arch_tp(s):
+    s.m.archive_period = 0
+
+
+@CONF.add("archive maximum <1-100>", "Nombre de sauvegardes gardees sur le switch")
+def c_arch_max(s, n):
+    n = int(n)
+    if not 1 <= n <= 100:
+        raise CliError("% 1 a 100")
+    s.m.archive_max = n
+
+
+@CONF.add("no archive", "Plus aucune sauvegarde automatique")
+def c_no_arch(s):
+    s.m.archive_path, s.m.archive_write, s.m.archive_period, s.m.archive_max = None, False, 0, 10
+
+
+# --- export Prometheus ------------------------------------------------------------
+
+@CONF.add("prometheus exporter", "Export des compteurs pour Prometheus / Zabbix (port 9101)")
+def c_prom(s):
+    s.m.prom = True
+
+
+@CONF.add("prometheus exporter port <port>", "Port d'ecoute de l'export")
+def c_prom_port(s, port):
+    port = int(port)
+    if not 1024 <= port <= 65535 or port in (443, 8443):
+        raise CliError("% Port 1024-65535")
+    s.m.prom = True
+    s.m.prom_port = port
+
+
+@CONF.add("prometheus exporter allow <reseau>", "Autoriser seulement ce reseau (ex : 192.0.2.0/24)")
+def c_prom_allow(s, net):
+    try:
+        n = str(ipaddress.ip_network(net, strict=False))
+    except ValueError:
+        raise CliError("% Reseau invalide")
+    if n not in s.m.prom_allow:
+        s.m.prom_allow.append(n)
+
+
+@CONF.add("no prometheus exporter allow <reseau>", "")
+def c_no_prom_allow(s, net):
+    try:
+        n = str(ipaddress.ip_network(net, strict=False))
+    except ValueError:
+        n = net
+    if n in s.m.prom_allow:
+        s.m.prom_allow.remove(n)
+
+
+@CONF.add("no prometheus exporter", "Couper l'export")
+def c_no_prom(s):
+    s.m.prom = False
 
 
 # --- sous-modes ----------------------------------------------------------------
@@ -1021,6 +1532,115 @@ def ci_nomtu(s):
         p.mtu = None
 
 
+def _l2_ports(s):
+    ps = ports_of(s)
+    for p in ps:
+        if p.channel_group is not None:
+            raise CliError("%% %s est membre d'un agregat : configure le Port-channel" % disp_if(p.name))
+    return ps
+
+
+@CONF_IF.add("switchport port-security", "Limiter les adresses MAC autorisees sur le port")
+def ci_ps(s):
+    for p in _l2_ports(s):
+        p.ps = True
+
+
+@CONF_IF.add("no switchport port-security", "")
+def ci_no_ps(s):
+    for p in ports_of(s):
+        p.ps = False
+
+
+@CONF_IF.add("switchport port-security maximum <1-1024>", "Nombre d'adresses MAC (1 par defaut)")
+def ci_ps_max(s, n):
+    n = int(n)
+    if not 1 <= n <= 1024:
+        raise CliError("% 1 a 1024")
+    for p in _l2_ports(s):
+        p.ps_max = n
+
+
+@CONF_IF.add("switchport port-security mac-address <mac>", "Adresse MAC autorisee en permanence")
+def ci_ps_mac(s, mac):
+    m = re.sub(r"[^0-9a-fA-F]", "", mac).lower()
+    if len(m) != 12 or int(m[:2], 16) & 1:
+        raise CliError("% Adresse MAC invalide")
+    mac = ":".join(m[i:i + 2] for i in range(0, 12, 2))
+    for p in _l2_ports(s):
+        if mac not in p.ps_macs:
+            p.ps_macs.append(mac)
+        p.ps_max = max(p.ps_max, len(p.ps_macs))
+
+
+@CONF_IF.add("no switchport port-security mac-address <mac>", "")
+def ci_no_ps_mac(s, mac):
+    m = re.sub(r"[^0-9a-fA-F]", "", mac).lower()
+    mac = ":".join(m[i:i + 2] for i in range(0, 12, 2))
+    for p in ports_of(s):
+        if mac in p.ps_macs:
+            p.ps_macs.remove(mac)
+
+
+@CONF_IF.add("switchport port-security violation <protect|restrict|shutdown>", "Que faire d'une MAC en trop")
+def ci_ps_viol(s, v):
+    full = [x for x in ("protect", "restrict", "shutdown") if x.startswith(v.lower())]
+    if len(full) != 1:
+        raise CliError("% protect, restrict ou shutdown")
+    for p in _l2_ports(s):
+        p.ps_violation = full[0]
+
+
+@CONF_IF.add("switchport port-security aging time <1-1440>", "Oublier les MAC apprises apres N minutes")
+def ci_ps_aging(s, n):
+    n = int(n)
+    if not 1 <= n <= 1440:
+        raise CliError("% 1 a 1440 minutes")
+    for p in _l2_ports(s):
+        p.ps_aging = n
+
+
+@CONF_IF.add("no switchport port-security aging time", "")
+def ci_no_ps_aging(s):
+    for p in ports_of(s):
+        p.ps_aging = 0
+
+
+@CONF_IF.add("ip dhcp snooping trust", "Port de confiance : serveur DHCP ou lien montant")
+def ci_trust(s):
+    for p in _l2_ports(s):
+        p.dhcp_trust = True
+
+
+@CONF_IF.add("no ip dhcp snooping trust", "")
+def ci_no_trust(s):
+    for p in ports_of(s):
+        p.dhcp_trust = False
+
+
+@CONF_IF.add("storm-control <broadcast|multicast> level pps <n>", "Limiter les tempetes (paquets/s, ex : 500 ou 1k)")
+def ci_storm(s, kind, n):
+    full = [x for x in ("broadcast", "multicast") if x.startswith(kind.lower())]
+    if len(full) != 1:
+        raise CliError("% broadcast ou multicast")
+    mo = re.fullmatch(r"(\d+)([km]?)", n.lower())
+    if not mo:
+        raise CliError("% Nombre de paquets/s (ex : 500, 1k)")
+    v = int(mo.group(1)) * {"": 1, "k": 1000, "m": 1000000}[mo.group(2)]
+    if not 10 <= v <= 10000000:
+        raise CliError("% 10 a 10m paquets/s")
+    for p in _l2_ports(s):
+        p.storm[full[0]] = v
+
+
+@CONF_IF.add("no storm-control <broadcast|multicast>", "")
+def ci_no_storm(s, kind):
+    for p in ports_of(s):
+        for k in ("broadcast", "multicast"):
+            if k.startswith(kind.lower()):
+                p.storm.pop(k, None)
+
+
 @CONF_SVI.add("ip address <ip/len>", "Adresse IP (192.168.1.10/24)")
 def cs_ip(s, a):
     a = parse_ip(a)
@@ -1170,6 +1790,8 @@ class Applier:
                      "nf_call_iptables 0 nf_call_ip6tables 0 nf_call_arptables 0" % BRIDGE)
         self.run("ip link set %s type bridge vlan_filtering 1 vlan_default_pvid 0 priority %d"
                  % (BRIDGE, m.stp_priority))
+        self.run("ip link set %s type bridge mcast_snooping %d mcast_querier %d"
+                 % (BRIDGE, 1 if m.igmp_snooping else 0, 1 if m.igmp_querier else 0), ignore=True)
         # adresse MAC du switch = celle du 1er port (comme un vrai switch). Sans ca,
         # systemd donne au pont une MAC inventee que les hyperviseurs (ESXi :
         # "Forged transmits / MAC changes = Reject") jettent : plus de DHCP ni de ping.
@@ -1219,6 +1841,7 @@ class Applier:
 
         # 4. ports du bridge
         bports = m.bridge_ports()
+        errdis = errdisable_load() if not self.dry else {}
         for name, l in links.items():
             if l.get("master") == BRIDGE and name not in bports and not name.startswith("vlan"):
                 self.run("ip link set %s nomaster" % name)
@@ -1237,7 +1860,7 @@ class Applier:
                 self.run("mstpctl setportbpduguard %s %s %s" % (BRIDGE, name, "yes" if p.bpduguard else "no"), ignore=True)
             elif self.dry and m.stp_mode == "rstp" and p.portfast:
                 self.run("mstpctl setportadminedge %s %s yes" % (BRIDGE, name))
-            self.run("ip link set %s %s" % (name, "down" if p.shutdown else "up"))
+            self.run("ip link set %s %s" % (name, "down" if p.shutdown or name in errdis else "up"))
         for name in m.physical:
             p = m.ports[name]
             if p.channel_group is not None:
@@ -1327,7 +1950,18 @@ class Applier:
             self.run("lldpcli configure system interface pattern 'ge*,po*'", ignore=True)
         self.snmp()
         self.ntp()
+        self.syslog()
+        self.radius()
         self.users()
+        # 9. securite des ports, DHCP snooping, storm control (nftables) et SPAN (tc)
+        self.filters()
+        self.span()
+        self.metrics()
+        if m.archive_path and not self.dry:
+            try:
+                archive_key()
+            except (OSError, subprocess.SubprocessError) as e:
+                self.warn.append("cle de sauvegarde : %s" % e)
         self.service("tlswitch-web", m.http)
         self.service("ssh", m.ssh)
         if not self.dry:
@@ -1364,7 +1998,8 @@ class Applier:
         m = self.m
         if self.dry:
             for u, (priv, h) in sorted(m.users.items()):
-                self.run("useradd/usermod %s (privilege %d, shell tlsh) ; chpasswd -e" % (u, priv))
+                self.run("useradd/usermod %s (privilege %d, shell tlsh) ; %s" % (
+                    u, priv, "mot de passe verifie par RADIUS" if h is None else "chpasswd -e"))
             return
         if not shutil.which("useradd"):
             return
@@ -1397,7 +2032,11 @@ class Applier:
                             cur = f[1]
                 except OSError:
                     pass
-            if cur != h:
+            if h is None:
+                # compte RADIUS : aucun mot de passe local ("*" n'est pas un compte verrouille)
+                if cur != "*":
+                    self.run("usermod -p '*' %s" % u, ignore=True)
+            elif cur != h:
                 subprocess.run(["chpasswd", "-e"], input="%s:%s\n" % (u, h), text=True)
                 self.run("usermod -U %s" % u, ignore=True)
         for u in members - set(m.users):
@@ -1441,24 +2080,201 @@ class Applier:
     def snmp(self):
         m = self.m
         conf = "/etc/snmp/snmpd.conf.d/tlswitch.conf"
-        if m.snmp_community:
-            content = ("# genere par TL-SwitchOS\nagentaddress udp:161,udp6:161\n"
-                       "rocommunity %s\nrocommunity6 %s\nsysName %s\nsysLocation %s\n"
-                       % (m.snmp_community, m.snmp_community, m.hostname, m.snmp_location or "TECH-LINUX"))
+        if m.snmp_community or m.snmp_users:
+            L = ["# genere par TL-SwitchOS", "agentaddress udp:161,udp6:161",
+                 "sysName %s" % m.hostname, "sysLocation %s" % (m.snmp_location or "-"),
+                 "sysContact %s" % (m.snmp_contact or "-")]
+            if m.snmp_community:
+                L += ["rocommunity %s" % m.snmp_community, "rocommunity6 %s" % m.snmp_community]
+            for u, (a, ka, p, kp) in sorted(m.snmp_users.items()):
+                A = {"sha": "SHA", "sha256": "SHA-256", "sha512": "SHA-512"}[a]
+                if p:
+                    L.append('createUser %s %s "%s" %s "%s"' % (u, A, ka, {"aes": "AES", "aes256": "AES256"}[p], kp))
+                    L.append("rouser %s priv" % u)
+                else:
+                    L.append('createUser %s %s "%s"' % (u, A, ka))
+                    L.append("rouser %s auth" % u)
+            content = "\n".join(L) + "\n"
             if self.dry:
                 self.run("ecrire %s ; systemctl restart snmpd" % conf)
             elif os.path.isdir("/etc/snmp"):
-                os.makedirs(os.path.dirname(conf), exist_ok=True)
                 old = open(conf).read() if os.path.exists(conf) else ""
                 if old != content:
-                    open(conf, "w").write(content)
+                    self.run("systemctl stop snmpd", ignore=True)
+                    snmp_forget_users()
+                    write_atomic(conf, content)
                     self.run("systemctl enable snmpd", ignore=True)
-                    self.run("systemctl restart --no-block snmpd", ignore=True)
+                    self.run("systemctl start --no-block snmpd", ignore=True)
             else:
                 self.warn.append("snmpd absent (apt install snmpd)")
         elif not self.dry and os.path.exists(conf):
             os.unlink(conf)
             self.run("systemctl disable --now --no-block snmpd", ignore=True)
+            snmp_forget_users()
+
+    def syslog(self):
+        """Copie du journal vers des serveurs syslog (rsyslog, file d'attente si le serveur est absent)."""
+        m = self.m
+        conf = "/etc/rsyslog.d/60-tlswitch.conf"
+        content = ""
+        if m.log_hosts:
+            lvl = RSYSLOG_LEVEL[m.log_level]
+            content = "# genere par TL-SwitchOS\n"
+            for i, (ip, proto, port) in enumerate(m.log_hosts):
+                content += ('*.%s action(type="omfwd" target="%s" port="%d" protocol="%s" '
+                            'queue.type="LinkedList" queue.size="10000" queue.filename="tlswitch%d" '
+                            'queue.saveOnShutdown="on" action.resumeRetryCount="-1")\n'
+                            % (lvl, ip, port, proto, i))
+        if self.dry:
+            if content:
+                self.run("ecrire %s ; systemctl restart rsyslog" % conf)
+            return
+        old = open(conf).read() if os.path.exists(conf) else ""
+        if old == content:
+            return
+        if content and not os.path.isdir("/etc/rsyslog.d"):
+            self.warn.append("rsyslog absent (apt install rsyslog) : syslog distant inactif")
+            return
+        if content:
+            write_atomic(conf, content, 0o644)
+            self.run("systemctl enable rsyslog", ignore=True)
+        elif os.path.exists(conf):
+            os.unlink(conf)
+        self.run("systemctl restart --no-block rsyslog", ignore=True)
+
+    def radius(self):
+        """SSH : PAM essaie le RADIUS puis le mot de passe local. Le web utilise radius_auth()."""
+        m = self.m
+        conf = "/etc/pam_radius_auth.conf"
+        pam = "/etc/pam.d/sshd"
+        on = bool(m.aaa_radius and m.radius)
+        line = "auth sufficient pam_radius_auth.so  # tlswitch-radius"
+        if self.dry:
+            if on:
+                self.run("ecrire %s ; %s : %s" % (conf, pam, line))
+            return
+        mod = [p for p in ("/lib/x86_64-linux-gnu/security/pam_radius_auth.so",
+                           "/usr/lib/x86_64-linux-gnu/security/pam_radius_auth.so",
+                           "/lib/security/pam_radius_auth.so") if os.path.exists(p)]
+        if on and not mod:
+            self.warn.append("libpam-radius-auth absent (apt install libpam-radius-auth) : "
+                             "RADIUS seulement pour le web")
+            on = False
+        if on:
+            txt = "# genere par TL-SwitchOS : serveur[:port] cle delai\n"
+            for ip, port, key in m.radius:
+                host = "[%s]" % ip if ":" in ip else ip
+                txt += "%s:%d %s %d\n" % (host, port, key, m.radius_timeout)
+            old = open(conf).read() if os.path.exists(conf) else ""
+            if old != txt:
+                write_atomic(conf, txt, 0o600)
+        try:
+            lines = open(pam).read().splitlines()
+        except OSError:
+            return
+        has = any("tlswitch-radius" in l for l in lines)
+        if on and not has:
+            out = []
+            done = False
+            for l in lines:
+                if not done and l.strip().startswith("@include common-auth"):
+                    out.append(line)
+                    done = True
+                out.append(l)
+            if not done:
+                out.insert(0, line)
+            write_atomic(pam, "\n".join(out) + "\n", 0o644)
+        elif not on and has:
+            write_atomic(pam, "\n".join(l for l in lines if "tlswitch-radius" not in l) + "\n", 0o644)
+
+    def filters(self):
+        """Une table nftables (famille bridge) : storm control, DHCP snooping, port security."""
+        text = nft_script(self.m)
+        state = os.path.join(RUN, "nft.regles")
+        if self.dry:
+            if text:
+                self.run("nft -f - <<table bridge tlswitch (%d lignes)>>" % text.count("\n"))
+            return
+        if not shutil.which("nft"):
+            if text:
+                self.warn.append("nftables absent (apt install nftables) : port security, "
+                                 "DHCP snooping et storm control inactifs")
+            return
+        present = subprocess.run(["nft", "list", "table", "bridge", "tlswitch"],
+                                 capture_output=True).returncode == 0
+        try:
+            old = open(state).read()
+        except OSError:
+            old = None
+        if present and old == text:
+            return
+        script = "table bridge tlswitch\ndelete table bridge tlswitch\n" + text if present else text
+        if text:
+            r = subprocess.run(["nft", "-f", "-"], input=script, capture_output=True, text=True)
+            if r.returncode != 0:
+                self.warn.append("nftables : %s" % r.stderr.strip()[-300:])
+                return
+        elif present:
+            subprocess.run(["nft", "delete", "table", "bridge", "tlswitch"], capture_output=True)
+        write_atomic(state, text, 0o644)
+        try:
+            os.unlink(PS_BASE)          # compteurs remis a zero avec la table
+        except OSError:
+            pass
+
+    def span(self):
+        """Port mirroring : copie du trafic des sources vers la destination (tc mirred)."""
+        m = self.m
+        want = []
+        for n in sorted(m.monitor):
+            sess = m.monitor[n]
+            if sess.get("dst"):
+                for src in sorted(sess["src"], key=natural_key):
+                    want.append((src, sess["src"][src], sess["dst"]))
+        key = repr(want)
+        state = os.path.join(RUN, "span.etat")
+        cmds = []
+        for src, d, dst in want:
+            cmds.append("tc qdisc replace dev %s clsact" % src)
+            if d in ("rx", "both"):
+                cmds.append("tc filter add dev %s ingress matchall skip_hw action mirred egress mirror dev %s" % (src, dst))
+            if d in ("tx", "both"):
+                cmds.append("tc filter add dev %s egress matchall skip_hw action mirred egress mirror dev %s" % (src, dst))
+        for dst in sorted(m.span_dsts()):
+            cmds.append("ip link set %s %s" % (dst, "down" if m.ports[dst].shutdown else "up"))
+        if self.dry:
+            for c in cmds:
+                self.run(c)
+            return
+        try:
+            old = open(state).read()
+        except OSError:
+            old = "[]"
+        if old == key:
+            return
+        if old != "[]" or want:
+            for name in m.physical + m.channels:
+                self.run("tc qdisc del dev %s clsact" % name, ignore=True)
+        if want and not shutil.which("tc"):
+            self.warn.append("tc absent (iproute2) : SPAN inactif")
+            return
+        for c in cmds:
+            self.run(c)
+        write_atomic(state, key, 0o644)
+
+    def metrics(self):
+        m = self.m
+        self.service("tlswitch-metrics", m.prom)
+        if self.dry or not m.prom:
+            return
+        f = os.path.join(RUN, "metrics.port")
+        try:
+            old = open(f).read()
+        except OSError:
+            old = None
+        if old is not None and old != str(m.prom_port):
+            self.run("systemctl restart --no-block tlswitch-metrics", ignore=True)
+        write_atomic(f, str(m.prom_port), 0o644)
 
     def ntp(self):
         conf = "/etc/systemd/timesyncd.conf.d/tlswitch.conf"
@@ -1505,6 +2321,474 @@ def log(msg):
     subprocess.run(["logger", "-t", "tlswitch", msg], capture_output=True)
 
 
+# ---------------------------------------------------------------------------
+# Securite des ports (nftables), err-disable, SNMPv3, RADIUS, sauvegardes
+# ---------------------------------------------------------------------------
+
+ERRDIS = os.path.join(RUN, "errdisable.json")
+PS_BASE = os.path.join(RUN, "ps-base.json")
+
+
+def errdisable_load():
+    try:
+        return json.load(open(ERRDIS))
+    except (OSError, ValueError):
+        return {}
+
+
+def errdisable_set(name, reason):
+    d = errdisable_load()
+    d[name] = {"raison": reason, "depuis": time.time()}
+    write_atomic(ERRDIS, json.dumps(d), 0o644)
+
+
+def errdisable_clear(name=None):
+    d = errdisable_load()
+    for n in ([name] if name else list(d)):
+        d.pop(n, None)
+    write_atomic(ERRDIS, json.dumps(d), 0o644)
+
+
+def _nft_name(prefix, port):
+    return "%s_%s" % (prefix, port)
+
+
+def nft_script(m):
+    """Table nftables du switch, ou "" si aucune fonction n'est utilisee.
+    Ordre par port : storm control, DHCP snooping, port security (accepte ou jette)."""
+    counters, sets, rules = [], [], []
+    bports = m.bridge_ports()
+    snoop_vids = set(m.dhcp_snooping_vlans) if m.dhcp_snooping_vlans else set(m.vlans)
+    for name in sorted(bports, key=natural_key):
+        p = m.ports[name]
+        iif = 'iifname "%s"' % name
+        for kind in ("broadcast", "multicast"):
+            if kind in p.storm:
+                c = _nft_name("storm" + kind[0], name)
+                counters.append(c)
+                rules.append('%s meta pkttype %s limit rate over %d/second burst %d packets counter name "%s" drop'
+                             % (iif, kind, p.storm[kind], p.storm[kind], c))
+        if m.dhcp_snooping and not p.dhcp_trust and set(m.port_vlans(name)[0]) & snoop_vids:
+            c = _nft_name("dhcp", name)
+            counters.append(c)
+            # reponses de serveur DHCP (offer, ack) venant d'un port non fiable : jetees
+            rules.append('%s udp sport 67 udp dport 68 counter name "%s" drop' % (iif, c))
+            rules.append('%s ip6 nexthdr udp udp sport 547 counter name "%s" drop' % (iif, c))
+        if p.ps:
+            st = _nft_name("ps", name)
+            counters.append(st)
+            size = max(p.ps_max, len(p.ps_macs), 1)
+            flags = "dynamic, timeout" if p.ps_aging else "dynamic"
+            body = "type ether_addr; size %d; flags %s;" % (size, flags)
+            if p.ps_macs:
+                body += " elements = { %s };" % ", ".join(p.ps_macs)
+            sets.append("  set %s { %s }" % (st, body))
+            rules.append('%s ether saddr @%s accept' % (iif, st))
+            if len(p.ps_macs) < size:
+                # aging : seules les MAC apprises expirent, les statiques restent
+                rules.append('%s add @%s { ether saddr%s } accept'
+                             % (iif, st, " timeout %dm" % p.ps_aging if p.ps_aging else ""))
+            rules.append('%s counter name "%s" drop' % (iif, st))
+    if not rules:
+        return ""
+    L = ["table bridge tlswitch {"]
+    L += ["  counter %s { }" % c for c in sorted(set(counters))]
+    L += sets
+    L += ["  chain entree {", "    type filter hook prerouting priority -200; policy accept;"]
+    L += ["    " + r for r in rules]
+    L += ["  }", "}"]
+    return "\n".join(L) + "\n"
+
+
+def nft_counters():
+    out = {}
+    try:
+        data = json.loads(sh("nft -j list counters table bridge tlswitch") or "{}")
+    except ValueError:
+        return out
+    for e in data.get("nftables", []):
+        c = e.get("counter")
+        if c and c.get("table") == "tlswitch":
+            out[c["name"]] = c.get("packets", 0)
+    return out
+
+
+def ps_violations(m):
+    """Appele par le guard : compare les compteurs de rejets port security a la derniere lecture."""
+    cnt = nft_counters()
+    try:
+        base = json.load(open(PS_BASE))
+    except (OSError, ValueError):
+        base = {}
+    errdis = errdisable_load()
+    for name in m.bridge_ports():
+        p = m.ports[name]
+        c = _nft_name("ps", name)
+        if not p.ps or c not in cnt:
+            continue
+        old = base.get(c, cnt[c] if c not in base else 0)
+        if cnt[c] > old and name not in errdis:
+            n = cnt[c] - old
+            if p.ps_violation == "shutdown":
+                errdisable_set(name, "psecure-violation")
+                sh(["ip", "link", "set", name, "down"])
+                log("%%PORT_SECURITY-2-PSECURE_VIOLATION: %s err-disabled (%d trames d'une MAC non autorisee)"
+                    % (disp_if(name), n))
+            elif p.ps_violation == "restrict":
+                log("%%PORT_SECURITY-2-PSECURE_VIOLATION: %s : %d trames d'une MAC non autorisee jetees"
+                    % (disp_if(name), n))
+        base[c] = cnt[c]
+    write_atomic(PS_BASE, json.dumps(base), 0o644)
+
+
+def errdisable_recover(m):
+    if not m.errdisable_recovery:
+        return
+    for name, e in errdisable_load().items():
+        if time.time() - e.get("depuis", 0) >= m.errdisable_recovery and name in m.ports:
+            errdisable_clear(name)
+            if not m.ports[name].shutdown:
+                sh(["ip", "link", "set", name, "up"])
+            log("errdisable : %s reactive (recovery interval)" % disp_if(name))
+
+
+def snmp_forget_users():
+    """snmpd recopie les comptes v3 dans /var/lib/snmp/snmpd.conf : on les oublie pour
+    qu'un utilisateur retire de la config ne reste pas valable."""
+    f = "/var/lib/snmp/snmpd.conf"
+    try:
+        lines = open(f).read().splitlines(True)
+    except OSError:
+        return
+    keep = [l for l in lines if not l.startswith("usmUser")]
+    if keep != lines:
+        write_atomic(f, "".join(keep), 0o600)
+
+
+def radius_auth(m, user, password):
+    """Client RADIUS (PAP + Message-Authenticator). True accepte, False refuse,
+    None aucun serveur n'a repondu."""
+    import hashlib
+    import hmac
+    import socket
+    if not m.radius or not password:
+        return None if not m.radius else False
+    pw = password.encode()[:128]
+    pw += b"\0" * (-len(pw) % 16)
+    for ip, port, key in m.radius:
+        secret = key.encode()
+        ident = os.urandom(1)[0]
+        ra = os.urandom(16)
+        enc, prev = b"", ra
+        for i in range(0, len(pw), 16):
+            b = hashlib.md5(secret + prev).digest()
+            prev = bytes(x ^ y for x, y in zip(pw[i:i + 16], b))
+            enc += prev
+
+        def attr(t, v):
+            return bytes([t, len(v) + 2]) + v
+        attrs = (attr(1, user.encode()[:64]) + attr(2, enc) + attr(32, m.hostname.encode())
+                 + attr(6, (1).to_bytes(4, "big"))
+                 + attr(80, b"\0" * 16))
+        length = 20 + len(attrs)
+        head = bytes([1, ident]) + length.to_bytes(2, "big")
+        ma = hmac.new(secret, head + ra + attrs, hashlib.md5).digest()
+        attrs = attrs[:-16] + ma
+        pkt = head + ra + attrs
+        fam = socket.AF_INET6 if ":" in ip else socket.AF_INET
+        so = socket.socket(fam, socket.SOCK_DGRAM)
+        so.settimeout(m.radius_timeout)
+        try:
+            for _ in range(2):
+                so.sendto(pkt, (ip, port))
+                try:
+                    data, _a = so.recvfrom(4096)
+                except socket.timeout:
+                    continue
+                if len(data) < 20 or data[1] != ident:
+                    continue
+                code = data[0]
+                rlen = int.from_bytes(data[2:4], "big")
+                expect = hashlib.md5(data[:4] + ra + data[20:rlen] + secret).digest()
+                if not hmac.compare_digest(expect, data[4:20]):
+                    log("radius : reponse de %s avec une mauvaise signature (cle ?)" % ip)
+                    break
+                if code == 2:
+                    return True
+                if code == 3:
+                    return False
+            # pas de reponse : serveur suivant
+        except OSError as e:
+            log("radius : %s injoignable (%s)" % (ip, e))
+        finally:
+            so.close()
+    return None
+
+
+def login_ok(m, user, password):
+    """Verification commune (web) : RADIUS si 'aaa ... group radius local', puis compte local."""
+    u = m.users.get(user)
+    if not u:
+        return False
+    # compte local d'abord : pas d'attente si le RADIUS est en panne, et le mot de passe
+    # local ne part jamais vers le serveur RADIUS
+    if u[1] is not None and check_secret(password, u[1]):
+        return True
+    if m.aaa_radius and m.radius:
+        return radius_auth(m, user, password) is True
+    return False
+
+
+ARCH_DIR = os.path.join(ETC, "archive")
+ARCH_KEY = os.path.join(ETC, "archive-cle")
+ARCH_KNOWN = os.path.join(ETC, "archive-hotes-connus")
+ARCH_STATE = os.path.join(ARCH_DIR, "etat.json")
+
+
+def archive_key():
+    """Cle SSH du switch pour deposer les sauvegardes (a autoriser sur le NAS)."""
+    if not os.path.exists(ARCH_KEY):
+        os.makedirs(ETC, exist_ok=True)
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "tlswitch-sauvegarde",
+                        "-f", ARCH_KEY], check=True, capture_output=True)
+    try:
+        return open(ARCH_KEY + ".pub").read().strip()
+    except OSError:
+        return ""
+
+
+def archive_list():
+    try:
+        return sorted(f for f in os.listdir(ARCH_DIR) if f.endswith(".conf"))
+    except OSError:
+        return []
+
+
+def archive_state():
+    try:
+        return json.load(open(ARCH_STATE))
+    except (OSError, ValueError):
+        return {}
+
+
+def archive_now(m, motif="manuelle"):
+    """Copie horodatee de la running-config : sur le switch (archive maximum) et, si
+    'archive path', sur le serveur en SCP. Renvoie (ok, message)."""
+    try:
+        text = open(RUNNING).read()
+    except OSError:
+        text = m.render()
+    st = archive_state()
+    st["essai"] = time.time()
+    hist = archive_list()
+    if motif == "periodique" and hist:
+        try:
+            if open(os.path.join(ARCH_DIR, hist[-1])).read() == text:
+                write_atomic(ARCH_STATE, json.dumps(st), 0o600)
+                return True, "configuration inchangee depuis %s" % hist[-1]
+        except OSError:
+            pass
+    name = "%s-%s.conf" % (m.hostname, time.strftime("%Y%m%d-%H%M%S"))
+    write_atomic(os.path.join(ARCH_DIR, name), text, 0o600)
+    for old in archive_list()[:-m.archive_max]:
+        try:
+            os.unlink(os.path.join(ARCH_DIR, old))
+        except OSError:
+            pass
+    ok, msg = True, "sauvegarde locale %s" % name
+    if m.archive_path:
+        try:
+            user, host, port, path = parse_scp_url(m.archive_path)
+            archive_key()
+            dest = "%s@%s:%s" % (user, "[%s]" % host if ":" in host else host,
+                                 (path.rstrip("/") or "") + "/" + name if path != "." else name)
+            r = subprocess.run(["scp", "-q", "-i", ARCH_KEY, "-P", str(port), "-o", "BatchMode=yes",
+                                "-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=" + ARCH_KNOWN,
+                                "-o", "ConnectTimeout=10", os.path.join(ARCH_DIR, name), dest],
+                               capture_output=True, text=True, timeout=120)
+            if r.returncode == 0:
+                msg = "%s copie sur %s" % (name, host)
+            else:
+                ok, msg = False, "echec SCP vers %s : %s" % (host, (r.stderr.strip() or "code %d" % r.returncode)[-200:])
+        except (CliError, OSError, subprocess.SubprocessError) as e:
+            ok, msg = False, "echec SCP : %s" % e
+    st.update({"date": time.time(), "motif": motif, "fichier": name, "ok": ok, "message": msg})
+    write_atomic(ARCH_STATE, json.dumps(st), 0o600)
+    log("archive (%s) : %s" % (motif, msg))
+    return ok, msg
+
+
+def archive_due(m):
+    if not m.archive_period:
+        return False
+    return time.time() - archive_state().get("essai", 0) >= m.archive_period * 60
+
+
+def archive_detached(motif):
+    if os.environ.get("TLSWITCH_DRY") or os.environ.get("TLSWITCH_NO_DAEMON"):
+        return
+    try:
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "archive", "--motif", motif],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Export Prometheus (texte, http://switch:9101/metrics)
+# ---------------------------------------------------------------------------
+
+STP_NUM = {"disabled": 0, "listening": 1, "learning": 2, "forwarding": 3, "blocking": 4, "discarding": 4}
+
+
+def _lbl(v):
+    return str(v).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
+def metrics_text(m):
+    links = link_table()
+    stp = stp_states()
+    errdis = errdisable_load()
+    cnt = nft_counters() if shutil.which("nft") else {}
+    out = []
+
+    def fam(name, typ, hlp):
+        out.append("# HELP %s %s" % (name, hlp))
+        out.append("# TYPE %s %s" % (name, typ))
+
+    fam("tlswitch_info", "gauge", "Version et nom du switch")
+    out.append('tlswitch_info{version="%s",hostname="%s"} 1' % (VERSION, _lbl(m.hostname)))
+    try:
+        up = float(open("/proc/uptime").read().split()[0])
+    except (OSError, ValueError):
+        up = 0
+    fam("tlswitch_uptime_seconds", "gauge", "Temps depuis le demarrage")
+    out.append("tlswitch_uptime_seconds %d" % up)
+    ports = m.physical + m.channels
+    rows = []
+    for name in ports:
+        p = m.ports[name]
+        l = links.get(name, {})
+        st = l.get("stats64", {})
+        lab = 'port="%s",ifname="%s",description="%s"' % (disp_if(name), name, _lbl(p.description))
+        rows.append((name, p, l, st, lab))
+    fam("tlswitch_port_up", "gauge", "1 si le lien est connecte")
+    for name, p, l, st, lab in rows:
+        out.append("tlswitch_port_up{%s} %d" % (lab, 1 if port_status(m, name, links) == "connected" else 0))
+    fam("tlswitch_port_admin_up", "gauge", "0 si le port est en shutdown ou err-disabled")
+    for name, p, l, st, lab in rows:
+        out.append("tlswitch_port_admin_up{%s} %d" % (lab, 0 if p.shutdown or name in errdis else 1))
+    fam("tlswitch_port_speed_bits", "gauge", "Vitesse negociee en bit/s")
+    for name, p, l, st, lab in rows:
+        try:
+            v = int(open("/sys/class/net/%s/speed" % name).read())
+        except (OSError, ValueError):
+            v = 0
+        out.append("tlswitch_port_speed_bits{%s} %d" % (lab, max(v, 0) * 1000000))
+    for d in ("rx", "tx"):
+        for k, typ in (("bytes", "octets"), ("packets", "paquets"), ("errors", "erreurs"),
+                       ("dropped", "paquets jetes"), ("multicast", "paquets multicast")):
+            if d == "tx" and k == "multicast":
+                continue
+            n = "tlswitch_port_%s_%s_total" % (d, k)
+            fam(n, "counter", "%s %s" % (typ.capitalize(), "recus" if d == "rx" else "emis"))
+            for name, p, l, st, lab in rows:
+                out.append("%s{%s} %d" % (n, lab, st.get(d, {}).get(k, 0)))
+    fam("tlswitch_port_stp_state", "gauge", "Etat STP : 0 disabled, 1 listening, 2 learning, 3 forwarding, 4 blocking")
+    for name, p, l, st, lab in rows:
+        if name in stp:
+            out.append("tlswitch_port_stp_state{%s} %d" % (lab, STP_NUM.get(stp[name], 0)))
+    try:
+        tc = int(open("/sys/class/net/%s/bridge/topology_change" % BRIDGE).read())
+    except (OSError, ValueError):
+        tc = 0
+    fam("tlswitch_stp_topology_change", "gauge", "1 pendant un changement de topologie STP")
+    out.append("tlswitch_stp_topology_change %d" % tc)
+    root = sh("cat /sys/class/net/%s/bridge/root_id 2>/dev/null" % BRIDGE).strip()
+    me = sh("cat /sys/class/net/%s/bridge/bridge_id 2>/dev/null" % BRIDGE).strip()
+    fam("tlswitch_stp_is_root", "gauge", "1 si ce switch est la racine STP")
+    out.append("tlswitch_stp_is_root %d" % (1 if root and root == me else 0))
+    fam("tlswitch_port_err_disabled", "gauge", "1 si le port est err-disabled")
+    for name, p, l, st, lab in rows:
+        out.append("tlswitch_port_err_disabled{%s} %d" % (lab, 1 if name in errdis else 0))
+    for pre, n, hlp in (("ps", "tlswitch_port_security_drops_total", "Trames jetees par le port security"),
+                        ("dhcp", "tlswitch_dhcp_snooping_drops_total", "Reponses DHCP jetees (port non fiable)"),
+                        ("stormb", "tlswitch_storm_broadcast_drops_total", "Broadcast jete par le storm control"),
+                        ("stormm", "tlswitch_storm_multicast_drops_total", "Multicast jete par le storm control")):
+        vals = [(lab, cnt[_nft_name(pre, name)]) for name, p, l, st, lab in rows if _nft_name(pre, name) in cnt]
+        if vals:
+            fam(n, "counter", hlp)
+            out += ["%s{%s} %d" % (n, lab, v) for lab, v in vals]
+    macs = {}
+    for e in sh_json("bridge -j fdb show br %s" % BRIDGE):
+        if "self" in e.get("flags", []) or e.get("state") == "permanent" or not e.get("ifname"):
+            continue
+        macs[e["ifname"]] = macs.get(e["ifname"], 0) + 1
+    fam("tlswitch_mac_entries", "gauge", "Adresses MAC apprises par port")
+    for name, p, l, st, lab in rows:
+        out.append("tlswitch_mac_entries{%s} %d" % (lab, macs.get(name, 0)))
+    fam("tlswitch_vlans", "gauge", "Nombre de VLAN definies")
+    out.append("tlswitch_vlans %d" % len(m.vlans))
+    return "\n".join(out) + "\n"
+
+
+def metrics_serve():
+    import http.server
+    import socket
+    import socketserver
+    m, _ = load_running()
+    port = m.prom_port
+
+    class H(http.server.BaseHTTPRequestHandler):
+        server_version = "tlswitch-metrics"
+        sys_version = ""
+
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            mm, _ = load_running()
+            ip = self.client_address[0]
+            if ip.startswith("::ffff:"):
+                ip = ip[7:]
+            try:
+                a = ipaddress.ip_address(ip)
+                allowed = not mm.prom_allow or any(a in ipaddress.ip_network(n) for n in mm.prom_allow)
+            except ValueError:
+                allowed = False
+            if not mm.prom or not allowed:
+                self.send_error(403)
+                return
+            if self.path.split("?")[0] not in ("/metrics", "/"):
+                self.send_error(404)
+                return
+            body = metrics_text(mm).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    class S(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+        address_family = socket.AF_INET6
+
+        def server_bind(self):
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            super().server_bind()
+
+    class S4(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+
+    try:
+        srv = S(("::", port), H)
+    except OSError:                     # IPv6 desactive sur le switch
+        srv = S4(("0.0.0.0", port), H)
+    srv.serve_forever()
+
+
+
 def commit(model, dry=False, out=sys.stdout):
     """Applique un modele et enregistre la running-config."""
     if os.environ.get("TLSWITCH_DRY"):           # tests : rien n'est touche sur le systeme
@@ -1544,7 +2828,8 @@ RB_PID = os.path.join(RUN, "rollback.pid")
 def mgmt_fingerprint(m):
     """Tout ce qui peut couper l'acces au switch (IP, VLAN des ports, agregats, SSH, web)."""
     parts = [repr(sorted((v, s.addresses, s.dhcp, s.shutdown) for v, s in m.svis.items())),
-             str(m.gateway), str(m.ssh), str(m.http), str(m.stp_mode), repr(sorted(m.users))]
+             str(m.gateway), str(m.ssh), str(m.http), str(m.stp_mode), repr(sorted(m.users)),
+             str(m.dhcp_snooping and any(s.dhcp for s in m.svis.values()))]
     mgmt_vids = set(m.svis)
     for name in sorted(m.ports, key=natural_key):
         p = m.ports[name]
@@ -1552,7 +2837,9 @@ def mgmt_fingerprint(m):
         if name in m.bridge_ports():
             want, pvid = m.port_vlans(name)
             vl = sorted((v, u) for v, u in want.items() if v in mgmt_vids), pvid in mgmt_vids and pvid
-        parts.append("%s:%s:%s:%s:%s:%s" % (name, p.shutdown, p.channel_group, p.lacp_mode, p.mtu, vl))
+        parts.append("%s:%s:%s:%s:%s:%s:%s:%s:%s" % (name, p.shutdown, p.channel_group, p.lacp_mode, p.mtu, vl,
+                                                 vl and (p.ps, p.ps_max, sorted(p.ps_macs), p.dhcp_trust),
+                                                 name in m.span_dsts(), vl and sorted(p.storm.items())))
     return "|".join(parts)
 
 
@@ -1651,6 +2938,8 @@ def change_password(user, new):
         m, _ = load_running()
     if user not in m.users:
         raise CliError("% Compte inconnu")
+    if m.users[user][1] is None:
+        raise CliError("% Compte RADIUS : le mot de passe se change dans l'annuaire")
     err = password_problem(user, new, m)
     if err:
         raise CliError("% Mot de passe refuse : " + err)
@@ -1731,6 +3020,8 @@ def port_status(m, name, links):
     p = m.ports.get(name)
     if p and p.shutdown:
         return "disabled"
+    if name in errdisable_load():
+        return "err-disabled"
     if not l:
         return "absent"
     if "LOWER_UP" in l.get("flags", []) and l.get("operstate") in ("UP", "UNKNOWN"):
@@ -1744,6 +3035,8 @@ def stp_states():
 
 def port_vlan_label(m, name):
     p = m.ports[name]
+    if name in m.span_dsts():
+        return "span"
     if p.channel_group is not None:
         return "Po%d" % p.channel_group
     return str(p.access_vlan) if p.mode == "access" else "trunk"
@@ -2080,6 +3373,192 @@ def x_env(s):
     s.say(out.rstrip() or "Pas de capteur disponible.")
 
 
+
+# --- show / exec des fonctions 1.0.3 -------------------------------------------
+
+@EXEC.add("show port-security", "Ports securises, MAC autorisees et violations")
+def x_ps(s):
+    m = s.m
+    cnt = nft_counters()
+    errdis = errdisable_load()
+    s.say("%-9s %-8s %-8s %-10s %-11s %s" % ("Port", "MaxMAC", "Apprises", "Rejets", "Action", "Etat"))
+    s.say("-" * 62)
+    for name in m.bridge_ports():
+        p = m.ports[name]
+        if not p.ps:
+            continue
+        learned = len(re.findall(r"([0-9a-f]{2}(?::[0-9a-f]{2}){5})",
+                                 sh("nft list set bridge tlswitch %s 2>/dev/null" % _nft_name("ps", name))))
+        s.say("%-9s %-8d %-8d %-10d %-11s %s" % (disp_if(name), max(p.ps_max, len(p.ps_macs)), learned,
+                                               cnt.get(_nft_name("ps", name), 0), p.ps_violation,
+                                               "err-disabled" if name in errdis else "ok"))
+        for mac in p.ps_macs:
+            s.say("          statique %s" % mac)
+
+
+@EXEC.add("show errdisable recovery", "Ports err-disabled")
+def x_errdis(s):
+    d = errdisable_load()
+    s.say("Reactivation automatique : %s" % ("%d s" % s.m.errdisable_recovery if s.m.errdisable_recovery else "non"))
+    for n, e in sorted(d.items()):
+        s.say("%-9s %-20s depuis %s" % (disp_if(n), e.get("raison", ""),
+                                        time.strftime("%H:%M:%S", time.localtime(e.get("depuis", 0)))))
+    if not d:
+        s.say("Aucun port err-disabled.")
+
+
+@EXEC.add("clear errdisable interface <...>", "Reactiver un port err-disabled")
+@priv15
+def x_clear_errdis(s, text):
+    for n in expand_if_range(text, s.m.ports):
+        errdisable_clear(n)
+        if n in s.m.ports and not s.m.ports[n].shutdown:
+            sh(["ip", "link", "set", n, "up"])
+        s.say("%s reactive" % disp_if(n))
+
+
+@EXEC.add("clear port-security dynamic", "Oublier les MAC apprises (les statiques restent)")
+@priv15
+def x_clear_ps(s):
+    for name in s.m.bridge_ports():
+        p = s.m.ports[name]
+        if p.ps:
+            sh(["nft", "flush", "set", "bridge", "tlswitch", _nft_name("ps", name)])
+            for mac in p.ps_macs:
+                sh(["nft", "add", "element", "bridge", "tlswitch", _nft_name("ps", name), "{ %s }" % mac])
+    s.say("MAC apprises effacees.")
+
+
+@EXEC.add("show ip dhcp snooping", "Etat du DHCP snooping")
+def x_dhcps(s):
+    m = s.m
+    s.say("DHCP snooping : %s" % ("actif" if m.dhcp_snooping else "inactif"))
+    if not m.dhcp_snooping:
+        return
+    s.say("VLAN surveillees : %s" % (fmt_vlan_list(m.dhcp_snooping_vlans) if m.dhcp_snooping_vlans else "toutes"))
+    cnt = nft_counters()
+    s.say("%-9s %-8s %s" % ("Port", "Trust", "Reponses DHCP jetees"))
+    for name in m.bridge_ports():
+        p = m.ports[name]
+        s.say("%-9s %-8s %s" % (disp_if(name), "yes" if p.dhcp_trust else "no",
+                                "-" if p.dhcp_trust else cnt.get(_nft_name("dhcp", name), 0)))
+
+
+@EXEC.add("show ip igmp snooping", "Etat de l'IGMP snooping")
+def x_igmp(s):
+    m = s.m
+    s.say("IGMP snooping : %s, querier : %s" % ("actif" if m.igmp_snooping else "inactif",
+                                              "oui" if m.igmp_querier else "non"))
+
+
+@EXEC.add("show ip igmp snooping groups", "Groupes multicast et ports abonnes")
+def x_igmp_groups(s):
+    s.say("%-6s %-40s %s" % ("Vlan", "Groupe", "Port"))
+    for e in sh_json("bridge -j mdb show"):
+        for g in e.get("mdb", [e]) if isinstance(e, dict) else []:
+            if "grp" in g:
+                s.say("%-6s %-40s %s" % (g.get("vid", "-"), g["grp"], disp_if(g.get("port", ""))))
+
+
+@EXEC.add("show storm-control", "Limites de broadcast et multicast")
+def x_storm(s):
+    m = s.m
+    cnt = nft_counters()
+    s.say("%-9s %-12s %-12s %s" % ("Port", "Broadcast", "Multicast", "Jetes"))
+    for name in m.bridge_ports():
+        p = m.ports[name]
+        if not p.storm:
+            continue
+        s.say("%-9s %-12s %-12s %d" % (disp_if(name), "%d pps" % p.storm["broadcast"] if "broadcast" in p.storm else "-",
+                                       "%d pps" % p.storm["multicast"] if "multicast" in p.storm else "-",
+                                       cnt.get(_nft_name("stormb", name), 0) + cnt.get(_nft_name("stormm", name), 0)))
+
+
+@EXEC.add("show monitor", "Sessions de port mirroring (SPAN)")
+def x_monitor(s):
+    if not s.m.monitor:
+        s.say("Aucune session SPAN.")
+    for n, sess in sorted(s.m.monitor.items()):
+        s.say("Session %d" % n)
+        s.say("  Sources      : %s" % (", ".join("%s (%s)" % (disp_if(x), d) for x, d in
+                                                sorted(sess["src"].items(), key=lambda i: natural_key(i[0]))) or "-"))
+        s.say("  Destination  : %s" % (disp_if(sess["dst"]) if sess.get("dst") else "- (session inactive)"))
+
+
+@EXEC.add("show snmp", "Configuration SNMP")
+def x_snmp(s):
+    m = s.m
+    s.say("Communaute v2c : %s" % ("configuree (lecture)" if m.snmp_community else "non"))
+    for u, (a, ka, p, kp) in sorted(m.snmp_users.items()):
+        s.say("Utilisateur v3 : %-16s auth %-7s priv %s" % (u, a, p or "aucun (authNoPriv)"))
+    s.say("Location : %s   Contact : %s" % (m.snmp_location or "-", m.snmp_contact or "-"))
+
+
+@EXEC.add("show logging hosts", "Serveurs syslog distants")
+def x_loghosts(s):
+    m = s.m
+    if not m.log_hosts:
+        s.say("Aucun serveur syslog distant.")
+    for ip, proto, port in m.log_hosts:
+        s.say("%s %s/%d (niveau %s)" % (ip, proto, port, m.log_level))
+
+
+@EXEC.add("show aaa servers", "Serveurs RADIUS")
+def x_aaa(s):
+    m = s.m
+    s.say("Connexion : %s" % ("RADIUS puis comptes locaux" if m.aaa_radius else "comptes locaux"))
+    for ip, port, key in m.radius:
+        s.say("RADIUS %s port %d, delai %d s" % (ip, port, m.radius_timeout))
+    r = [u for u, v in sorted(m.users.items()) if v[1] is None]
+    if r:
+        s.say("Comptes RADIUS : %s" % ", ".join(r))
+
+
+@EXEC.add("test aaa group radius <compte> <motdepasse>", "Tester une connexion RADIUS")
+@priv15
+def x_test_aaa(s, user, pw):
+    r = radius_auth(s.m, user, pw)
+    s.say({True: "Utilisateur authentifie (Access-Accept).", False: "Refuse (Access-Reject).",
+           None: "Aucun serveur RADIUS n'a repondu (adresse, cle, pare-feu ?)."}[r])
+
+
+@EXEC.add("show archive", "Sauvegardes de la configuration")
+def x_archive(s):
+    m = s.m
+    st = archive_state()
+    s.say("Destination     : %s" % (m.archive_path or "switch seulement"))
+    s.say("A chaque write  : %s" % ("oui" if m.archive_write else "non"))
+    s.say("Periodique      : %s" % ("toutes les %d min" % m.archive_period if m.archive_period else "non"))
+    if st.get("date"):
+        s.say("Derniere        : %s  %s  %s" % (time.strftime("%Y-%m-%d %H:%M", time.localtime(st["date"])),
+                                               "OK" if st.get("ok") else "ECHEC", st.get("message", "")))
+    hist = archive_list()
+    s.say("Sur le switch (%d/%d) :" % (len(hist), m.archive_max))
+    for f in hist[::-1]:
+        s.say("  %s" % f)
+    if m.archive_path:
+        try:
+            s.say("Cle publique a autoriser sur le serveur (~/.ssh/authorized_keys) :")
+            s.say("  " + archive_key())
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+@EXEC.add("archive config", "Sauvegarder la configuration maintenant")
+@priv15
+def x_archive_now(s):
+    ok, msg = archive_now(s.m, "manuelle")
+    s.say(("" if ok else "% ") + msg)
+
+
+@EXEC.add("show metrics", "Apercu de l'export Prometheus")
+def x_metrics(s):
+    m = s.m
+    s.say("Export Prometheus : %s" % ("http://<ip-du-switch>:%d/metrics" % m.prom_port if m.prom else "inactif"))
+    if m.prom_allow:
+        s.say("Autorise depuis : %s" % ", ".join(m.prom_allow))
+
+
 @EXEC.add("enable", "Passer au niveau 15")
 def x_enable(s):
     if s.priv >= 15:
@@ -2152,6 +3631,8 @@ def _write(s):
     rollback_cancel()
     log("configuration enregistree par %s" % s.user)
     s.say("Building configuration...\n[OK]")
+    if s.m.archive_write:
+        archive_detached("write-memory")
 
 
 @EXEC.add("write memory", "Enregistrer la configuration")
@@ -3300,17 +4781,29 @@ def guard():
         commit(m)
         return 0
     m, _ = load_running()
-    wanted = {"lldpd": m.lldp, "tlswitch-web": m.http, "ssh": m.ssh,
+    wanted = {"lldpd": m.lldp, "tlswitch-web": m.http, "ssh": m.ssh, "tlswitch-metrics": m.prom,
               "mstpd": m.stp_mode == "rstp" and bool(shutil.which("mstpctl"))}
     for svc, on in wanted.items():
         if on and subprocess.run(["systemctl", "is-active", "--quiet", svc]).returncode != 0:
             log("guard : %s arrete, redemarrage" % svc)
             subprocess.run(["systemctl", "restart", svc])
     # ports desactives par le noyau (ex : lien qui a disparu puis revenu) : on remet l'etat voulu
+    # table nftables effacee (ex : service nftables qui vide tout) : on la remet
+    if nft_script(m) and shutil.which("nft") and subprocess.run(
+            ["nft", "list", "table", "bridge", "tlswitch"], capture_output=True).returncode != 0:
+        log("guard : regles de securite des ports absentes, reapplication")
+        Applier(m).filters()
+    ps_violations(m)
+    errdisable_recover(m)
+    if archive_due(m):
+        archive_detached("periodique")
+    errdis = errdisable_load()
     links = {l["ifname"]: l for l in sh_json("ip -j link show")}
-    for name in m.physical:
+    for name in m.physical + m.channels:
         p = m.ports[name]
         l = links.get(name)
+        if name in errdis:
+            continue
         if l and not p.shutdown and "UP" not in l.get("flags", []):
             log("guard : %s etait down administrativement, reactivation" % name)
             sh(["ip", "link", "set", name, "up"])
@@ -3401,6 +4894,16 @@ def main(argv):
             return 2
     if cmd == "guard":
         return guard()
+    if cmd == "metrics":
+        metrics_serve()
+        return 0
+    if cmd == "archive":
+        motif = args[args.index("--motif") + 1] if "--motif" in args[:-1] else "manuelle"
+        with Lock():
+            m, _ = load_running()
+        ok, msg = archive_now(m, motif)
+        print(msg)
+        return 0 if ok else 1
     if cmd in ("apply", "check"):
         dry = "--dry-run" in args
         args = [a for a in args if a != "--dry-run"]

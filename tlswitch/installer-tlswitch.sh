@@ -45,7 +45,7 @@ if [ "${TLS_VERBOSE:-0}" = 1 ]; then OUT=/dev/stdout; Q=""; else OUT=/dev/null; 
 APT_OPTS="-o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Dpkg::Use-Pty=0"
 CORE="python3 iproute2 ethtool lldpd openssh-server openssl sudo ca-certificates"
 # utiles mais pas bloquants (mstpd absent = STP classique a la place de RSTP)
-OPT="console-setup keyboard-configuration kbd mstpd isc-dhcp-client snmpd irqbalance lm-sensors traceroute iperf3 fail2ban systemd-timesyncd tcpdump less nano bridge-utils"
+OPT="console-setup keyboard-configuration kbd mstpd isc-dhcp-client snmpd rsyslog nftables libpam-radius-auth irqbalance lm-sensors traceroute iperf3 fail2ban systemd-timesyncd tcpdump less nano bridge-utils"
 manque() { local m=""; for p in "$@"; do dpkg -s "$p" >/dev/null 2>&1 || m="$m $p"; done; echo "$m"; }
 MC=$(manque $CORE); MO=$(manque $OPT)
 if [ -z "$MC$MO" ]; then

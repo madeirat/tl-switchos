@@ -74,7 +74,7 @@ function fmtUp(s_) { const d = Math.floor(s_ / 86400), hh = Math.floor(s_ % 8640
 const isAdmin = () => ME && ME.priv >= 15;
 const vcolor = (vid) => "hsl(" + ((vid * 47) % 360) + " 70% 55%)";
 const phys = () => ST.ports.filter((p) => !p.name.startsWith("po"));
-const STATUS = { connected: ["Connecté", "ok"], notconnect: ["Pas de lien", ""], disabled: ["Désactivé", "off"], absent: ["Absent", "off"] };
+const STATUS = { connected: ["Connecté", "ok"], notconnect: ["Pas de lien", ""], disabled: ["Désactivé", "off"], absent: ["Absent", "off"], "err-disabled": ["Bloqué (sécurité)", "off"] };
 function statusPill(p) { const [t, c] = STATUS[p.status] || [p.status, ""]; return h("span", { class: "pill " + c }, h("span", { class: "dot " + c }), t); }
 function vlanLabel(p) {
   if (p.cg) return "Membre de Po" + p.cg;

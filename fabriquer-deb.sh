@@ -21,7 +21,7 @@
 set -euo pipefail
 TLSU="${1:?usage : bash fabriquer-deb.sh TL-SwitchOS-<version>.tlsu}"
 [ -f "$TLSU" ] || { echo "fichier introuvable : $TLSU"; exit 1; }
-DEPENDS="python3, iproute2, openssl, bridge-utils, ethtool, lldpd, openssh-server, sudo, ca-certificates"
+DEPENDS="python3, iproute2, openssl, bridge-utils, ethtool, lldpd, openssh-server, openssh-client, sudo, ca-certificates, nftables, rsyslog, libpam-radius-auth | libpam-runtime"
 
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 tar xf "$TLSU" -C "$W" MANIFEST.json

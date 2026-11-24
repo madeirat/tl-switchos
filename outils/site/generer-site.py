@@ -104,9 +104,9 @@ FONCTIONS = [
     ("cli", "CLI d'administrateur réseau", "Les commandes que l'on connaît, avec abréviations, aide et complétion."),
     ("web", "Interface web", "Les ports en direct et toute la configuration, depuis le navigateur."),
     ("vlan", "VLAN, LACP, RSTP", "Access et trunk, agrégats de liens et protection contre les boucles."),
-    ("supervision", "Supervision", "LLDP, SNMP, NTP et journaux pour garder un œil sur le réseau."),
+    ("supervision", "Supervision", "SNMPv3, syslog distant, export Prometheus et LLDP pour garder un œil sur le réseau."),
     ("maj", "Mises à jour signées", "Le système et Debian se mettent à jour ensemble, avec retour arrière automatique."),
-    ("secours", "Filet de sécurité", "Une erreur coupe l'accès ? Le switch revient seul à sa configuration précédente."),
+    ("secours", "Sécurité des ports", "Port security, DHCP snooping, storm control, connexion RADIUS et sauvegarde automatique."),
 ]
 
 ICONES = {
@@ -211,7 +211,7 @@ VLAN Name        Status    Ports
 </section>
 
 <div class="puces largeur" aria-label="Protocoles">
-  <span>VLAN 802.1Q</span><span>LACP</span><span>RSTP</span><span>LLDP</span><span>SNMP</span><span>SSH</span><span>HTTPS</span>
+  <span>VLAN 802.1Q</span><span>LACP</span><span>RSTP</span><span>LLDP</span><span>IGMP</span><span>SPAN</span><span>SNMPv3</span><span>RADIUS</span><span>Prometheus</span>
 </div>
 
 <section id="fonctions" class="bloc largeur">

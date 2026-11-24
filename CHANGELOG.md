@@ -1,5 +1,21 @@
 # Historique des versions
 
+## 1.0.3
+
+- **SNMPv3** (SHA-256/512, AES) en plus de la communauté v2c, avec `snmp-server contact`. Un utilisateur retiré de la config ne reste pas valable dans snmpd.
+- **Syslog distant** : `logging host` en UDP ou TCP, `logging trap <niveau>`. Les messages sont gardés en file d'attente si le serveur ne répond pas.
+- **Connexion des administrateurs par RADIUS** (NPS de l'annuaire AD, FreeRADIUS) en SSH et sur le web : `radius-server host`, `aaa authentication login default group radius local`, comptes `username <nom> privilege 15 radius`, `test aaa group radius`. Le compte local reste toujours valable et n'est jamais envoyé au serveur RADIUS par le web.
+- **Port security** : MAC statiques, nombre maximum, aging, violation `protect`, `restrict` ou `shutdown` avec état `err-disabled`, `clear errdisable interface`, `errdisable recovery interval`.
+- **DHCP snooping** : réponses DHCP v4/v6 jetées sur les ports non `trust`, par VLAN si besoin.
+- **IGMP snooping** (actif par défaut) et **querier**, `show ip igmp snooping groups`.
+- **Storm control** broadcast et multicast en paquets par seconde.
+- **Port mirroring (SPAN)** : `monitor session` en rx, tx ou les deux, jusqu'à 4 sessions.
+- **Sauvegarde automatique** de la configuration en SCP (clé SSH propre au switch) : à chaque `write memory` et/ou périodiquement si la config a changé, historique horodaté sur le NAS et sur le switch, `show archive`, `archive config`.
+- **Export Prometheus** sur le port 9101 (trafic, paquets, erreurs, rejets, état STP, MAC apprises, err-disabled par port), avec liste de réseaux autorisés. Lisible aussi par Zabbix.
+- Correction : `username <nom> password-change-required` sur un compte inconnu plantait au lieu d'afficher l'erreur.
+- Le paquet Debian dépend maintenant de `nftables`, `rsyslog` et `libpam-radius-auth`.
+- Site : `robots.txt` et `sitemap.xml` générés avec le domaine du site. Le dépôt APT demande aux moteurs de recherche de ne pas l'indexer.
+
 ## 1.0.2
 
 - **Dépôt APT TL-SwitchOS** : `show install updates` et `install update` en CLI, ou bouton **Rechercher les mises à jour** sur la page web Mise à jour. Une seule mise à jour couvre TL-SwitchOS et Debian, avec vérification, test et retour automatique comme pour les fichiers `.tlsu`.

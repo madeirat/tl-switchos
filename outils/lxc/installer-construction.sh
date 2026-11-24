@@ -257,7 +257,10 @@ $ECOUTE80
     ssl_certificate_key $D/key.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
     root /srv/depot;
-    autoindex off;
+    # liste des fichiers, comme un miroir Debian (contenu public et signe)
+    autoindex on;
+    autoindex_exact_size off;
+    autoindex_localtime on;
     server_tokens off;
     index index.html;
     add_header X-Content-Type-Options nosniff always;
@@ -266,10 +269,12 @@ $ECOUTE80
     add_header Content-Security-Policy "default-src 'none'; frame-ancestors 'none'" always;
     client_max_body_size 1k;
     location ~ /\. { deny all; }
+    # depot de paquets : rien a indexer pour les moteurs de recherche
+    location = /robots.txt { default_type text/plain; return 200 "User-agent: *\\nDisallow: /\\n"; }
     location ~ \.iso\$ { add_header Content-Disposition attachment always; add_header X-Content-Type-Options nosniff always; }
     location / {
         limit_except GET { deny all; }
-        try_files \$uri =404;
+        try_files \$uri \$uri/ =404;
     }
 }
 EOF

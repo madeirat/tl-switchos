@@ -323,7 +323,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             pw = str(data.get("password", ""))[:128]
             m, _ = T.load_running()
             u = m.users.get(user)
-            if u and T.check_secret(pw, u[1]):
+            if u and T.login_ok(m, user, pw):
                 sid = new_session(user, u[0], user in m.must_change)
                 T.log("web : connexion de %s depuis %s" % (user, ip))
                 return self.send(200, {"ok": True}, extra={
@@ -344,6 +344,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     u = m.users.get(s["user"])
                     old = str(data.get("old", ""))[:128]
                     new = str(data.get("new", ""))[:128]
+                    if u and u[1] is None:
+                        return self.send(200, {"error": "compte RADIUS : le mot de passe se change dans l'annuaire"})
                     if not u or (not s.get("must_change") and not T.check_secret(old, u[1])):
                         time.sleep(1)
                         return self.send(200, {"error": "mot de passe actuel incorrect"})

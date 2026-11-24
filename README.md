@@ -10,10 +10,14 @@ TL-SwitchOS s'installe depuis une clé USB, comme un système de switch : une IS
 
 - **CLI familière aux administrateurs réseau** : `conf t`, `interface Gi1/0/3`, `switchport access vlan 20`, `show vlan brief`, `wr`… avec abréviations, `?` et Tab.
 - **Interface web HTTPS** : façade des ports en direct, ports, VLAN, agrégats, IP, comptes, table MAC, voisins LLDP, sauvegarde de la config et console web. Chaque action affiche les commandes CLI équivalentes.
-- **VLAN 802.1Q** (access, trunk, VLAN native), **LACP** (Port-channel), **RSTP/STP**, PortFast, BPDU Guard, **LLDP**, **SNMP v2c**, NTP, MTU jumbo, interfaces `Vlan` de gestion en IP fixe ou DHCP.
+- **VLAN 802.1Q** (access, trunk, VLAN native), **LACP** (Port-channel), **RSTP/STP**, PortFast, BPDU Guard, **LLDP**, NTP, MTU jumbo, interfaces `Vlan` de gestion en IP fixe ou DHCP.
+- **Sécurité des ports** : port security (MAC autorisées, maximum, violation protect/restrict/shutdown, err-disable), **DHCP snooping**, **storm control** broadcast/multicast.
+- **Multicast** : IGMP snooping (actif par défaut) et querier. **Port mirroring (SPAN)** vers une sonde ou un poste Wireshark.
+- **Supervision** : **SNMP v2c et v3** (SHA-2, AES), **syslog distant** (UDP/TCP), **export Prometheus** (trafic, erreurs, STP, sécurité par port), utilisable aussi par Zabbix.
+- **Administration** : connexion SSH et web par **RADIUS** (par exemple le NPS d'un annuaire Active Directory), comptes locaux en secours. **Sauvegarde automatique** de la config en SCP vers un NAS, avec historique.
 - **Mises à jour signées** par dépôt APT ou fichier `.tlsu`, avec retour automatique à la version précédente en cas d'échec.
 - **Retour arrière automatique** si une modification coupe l'accès de gestion.
-- Niveau 2 uniquement, **aucun pare-feu sur le pont** : le routage et le filtrage restent sur le routeur ou le pare-feu.
+- Niveau 2 uniquement : le routage et le filtrage restent sur le routeur ou le pare-feu. Le pont ne filtre que ce que demandent port security, DHCP snooping et storm control.
 
 | Ports | VLAN |
 |---|---|
@@ -128,6 +132,47 @@ wr
 
 Côté équipement en amont, le port qui descend vers ce switch doit être en trunk avec les mêmes VLAN taguées.
 
+## Sécurité, supervision et sauvegarde (1.0.3)
+
+```
+! supervision
+snmp-server user supervision auth sha256 <cle-auth> priv aes <cle-priv>
+snmp-server location Salle serveur
+logging host 192.0.2.30
+logging host 192.0.2.31 transport tcp port 6514
+prometheus exporter
+prometheus exporter allow 192.0.2.0/24
+!
+! administrateurs de l'annuaire (serveur NPS ou FreeRADIUS)
+radius-server host 192.0.2.10 key <cle-partagee>
+aaa authentication login default group radius local
+username jdupont privilege 15 radius
+!
+! sauvegarde vers un NAS, a chaque wr et chaque jour si la config a change
+archive path scp://sauvegarde@192.0.2.20/volume1/switchs
+archive write-memory
+archive time-period 1440
+!
+ip dhcp snooping
+ip dhcp snooping vlan 10,30
+monitor session 1 source interface Gi1/0/3 both
+monitor session 1 destination interface Gi1/0/8
+!
+interface Gi1/0/1
+ ip dhcp snooping trust
+interface range Gi1/0/4-6
+ switchport port-security
+ switchport port-security maximum 2
+ switchport port-security violation restrict
+ storm-control broadcast level pps 500
+```
+
+- **RADIUS** : le compte (`username … radius`) doit exister sur le switch, son mot de passe est vérifié par le serveur RADIUS. Un compte local niveau 15 avec mot de passe reste obligatoire pour le secours. Côté NPS, déclarer le switch comme client RADIUS (même clé) et une stratégie pour le groupe AD des administrateurs réseau. Test : `test aaa group radius <compte> <mot de passe>`.
+- **Sauvegarde** : `show archive` affiche la clé publique du switch, à ajouter dans `~/.ssh/authorized_keys` du compte sur le NAS. Chaque copie est horodatée (`SWITCH01-AAAAMMJJ-HHMMSS.conf`), l'historique est gardé sur le NAS et sur le switch (`archive maximum`, 10 par défaut). `archive config` sauvegarde tout de suite.
+- **Port security** : une MAC en trop est jetée tout de suite. Avec `violation shutdown` (par défaut), le port passe `err-disabled` dans la minute. `clear errdisable interface Gi1/0/4` le réactive, `errdisable recovery interval 300` le fait tout seul.
+- **Prometheus** : `http://<ip>:9101/metrics`. Zabbix le lit avec un élément HTTP et le prétraitement Prometheus, ou en SNMPv3.
+- **DHCP snooping** : les réponses de serveur DHCP (v4 et v6) qui arrivent sur un port non `trust` sont jetées. Le lien montant vers le serveur DHCP doit être `trust`.
+
 ## Commandes utiles
 
 ```
@@ -141,6 +186,10 @@ write memory | copy running-config startup-config | write erase | reload
 show install summary | show install updates | install update | install rollback
 install add file <url ou usbflash0:fichier.tlsu> activate
 ping <ip> | traceroute <ip> | clear mac address-table dynamic | enable | disable
+show port-security | show ip dhcp snooping | show storm-control | show errdisable recovery
+show ip igmp snooping [groups] | show monitor | show snmp | show logging hosts | show aaa servers
+show archive | archive config | show metrics | test aaa group radius <compte> <mot de passe>
+clear errdisable interface Gi1/0/4 | clear port-security dynamic
 ```
 
 ## Mises à jour
@@ -215,13 +264,15 @@ bash fabriquer-deb.sh TL-SwitchOS-<version>.tlsu    # .deb  -> tlswitch_<version
 | `tlswitch/boot/` | Thème du menu de démarrage |
 | `tests/lab.sh` | Lab de test (namespaces Linux, routeur simulé en LACP) |
 | `tests/maj-test.sh` | Tests des mises à jour (paquets piégés, retour automatique, rollback) |
+| `tests/securite-test.sh` | Tests des fonctions de sécurité sur un vrai noyau (port security, DHCP snooping, storm control, SPAN) |
 
 ## Tests
 
 - **Installation complète** depuis l'installateur Debian, en machine virtuelle : aucune question hors nom et VLAN, disque unique effacé automatiquement, IP DHCP reprise, premier démarrage avec IP affichée avant le login, connexion `admin`/`admin` avec changement forcé, CLI, web et SSH.
 - **Lab réseau** sur un vrai noyau Linux : isolation des VLAN, access, trunk, VLAN native, LACP avec perte d'un lien, changement à chaud, retour arrière automatique, reconstruction après incident, idempotence.
 - **Mises à jour** : paquets piégés refusés (manifeste modifié, contenu remplacé, autre clé), version cassée avec retour automatique, erreur de syntaxe détectée avant installation, `install rollback`.
-- Pas encore testé : RSTP avec `mstpd` sur Debian 13, le débit réel sur Atom D510 et une vraie montée Debian 13 → 14.
+- **Fonctions 1.0.3** sur un noyau Linux réel (pont + namespaces) : port security (MAC statique, apprentissage limité, rejet, err-disable), DHCP snooping, storm control, chargement des règles nftables. Client RADIUS testé contre un serveur de test (accepté, refusé, mauvaise clé). Export Prometheus, rendu et relecture de toute la configuration.
+- Pas encore testé : RSTP avec `mstpd` sur Debian 13, le débit réel sur Atom D510, une vraie montée Debian 13 → 14, et en 1.0.3 le SPAN (le noyau de test n'a pas `tc matchall`), SNMPv3 avec `snmpd`, le RADIUS en SSH via `pam_radius_auth` et un vrai NPS.
 
 Historique des versions : [CHANGELOG.md](CHANGELOG.md).
 
