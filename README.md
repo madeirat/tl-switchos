@@ -10,7 +10,7 @@ TL-SwitchOS s'installe depuis une clé USB, comme un système de switch : une IS
 
 - **CLI familière aux administrateurs réseau** : `conf t`, `interface Gi1/0/3`, `switchport access vlan 20`, `show vlan brief`, `wr`… avec abréviations, `?` et Tab.
 - **Interface web HTTPS** : façade des ports en direct, ports, VLAN, agrégats, IP, comptes, table MAC, voisins LLDP, sauvegarde de la config et console web. Chaque action affiche les commandes CLI équivalentes.
-- **VLAN 802.1Q** (access, trunk, VLAN native), **LACP** (Port-channel), **RSTP/STP**, PortFast, BPDU Guard, **LLDP**, NTP, MTU jumbo, interfaces `Vlan` de gestion en IP fixe ou DHCP.
+- **VLAN 802.1Q** (access, trunk, VLAN natif), **LACP** (Port-channel), **RSTP/STP**, PortFast, BPDU Guard, **LLDP**, NTP, MTU jumbo, interfaces `Vlan` de gestion en IP fixe ou DHCP.
 - **Sécurité des ports** : port security (MAC autorisées, maximum, violation protect/restrict/shutdown, err-disable), **DHCP snooping**, **storm control** broadcast/multicast.
 - **Multicast** : IGMP snooping (actif par défaut) et querier. **Port mirroring (SPAN)** vers une sonde ou un poste Wireshark.
 - **Supervision** : **SNMP v2c et v3** (SHA-2, AES), **syslog distant** (UDP/TCP), **export Prometheus** (trafic, erreurs, STP, sécurité par port), utilisable aussi par Zabbix.
@@ -67,7 +67,14 @@ Le journal complet de l'installation est dans `/var/log/tlswitch-install.log`. S
 ### Autres méthodes
 
 - **Par le réseau (iPXE)** : `bash construire-iso.sh --ipxe http://192.168.1.5/tlswitch` produit un dossier à copier sur un serveur HTTP, plus l'entrée à ajouter au menu iPXE.
-- **Sur une Debian 13 déjà installée** :
+- **Sur une Debian 13 déjà installée**, depuis le dépôt (dernière version, clé du dépôt vérifiée) :
+  ```bash
+  curl -fsSLO https://deb.tech-linux.fr/tlswitchos/installer.sh
+  bash installer.sh
+  reboot
+  ```
+  Le script demande le nom du switch et le VLAN de gestion, puis lance le même installateur que l'ISO. Le switch reste branché sur le dépôt pour ses mises à jour.
+  Ou depuis les sources :
   ```bash
   cd tl-switchos/tlswitch
   TLS_HOSTNAME=switch01 TLS_MGMT_VLAN=99 TLS_IP=192.168.1.30/24 TLS_GW=192.168.1.1 bash installer-tlswitch.sh
@@ -75,7 +82,7 @@ Le journal complet de l'installation est dans `/var/log/tlswitch-install.log`. S
   ```
   Sans `TLS_IP`, l'installateur reprend l'IP actuelle de la machine.
 
-Au premier démarrage, les ports sont renommés `Gi1/0/1` à `Gi1/0/N` dans l'ordre PCI, tous en access sur la VLAN de gestion.
+Au premier démarrage, les ports sont renommés `Gi1/0/1` à `Gi1/0/N` dans l'ordre PCI, tous en access sur le VLAN de gestion.
 
 ## Accès
 
@@ -130,7 +137,7 @@ end
 wr
 ```
 
-Côté équipement en amont, le port qui descend vers ce switch doit être en trunk avec les mêmes VLAN taguées.
+Côté équipement en amont, le port qui descend vers ce switch doit être en trunk avec les mêmes VLAN tagués.
 
 ## Sécurité, supervision et sauvegarde (1.0.3)
 
@@ -269,7 +276,7 @@ bash fabriquer-deb.sh TL-SwitchOS-<version>.tlsu    # .deb  -> tlswitch_<version
 ## Tests
 
 - **Installation complète** depuis l'installateur Debian, en machine virtuelle : aucune question hors nom et VLAN, disque unique effacé automatiquement, IP DHCP reprise, premier démarrage avec IP affichée avant le login, connexion `admin`/`admin` avec changement forcé, CLI, web et SSH.
-- **Lab réseau** sur un vrai noyau Linux : isolation des VLAN, access, trunk, VLAN native, LACP avec perte d'un lien, changement à chaud, retour arrière automatique, reconstruction après incident, idempotence.
+- **Lab réseau** sur un vrai noyau Linux : isolation des VLAN, access, trunk, VLAN natif, LACP avec perte d'un lien, changement à chaud, retour arrière automatique, reconstruction après incident, idempotence.
 - **Mises à jour** : paquets piégés refusés (manifeste modifié, contenu remplacé, autre clé), version cassée avec retour automatique, erreur de syntaxe détectée avant installation, `install rollback`.
 - **Fonctions 1.0.3** sur un noyau Linux réel (pont + namespaces) : port security (MAC statique, apprentissage limité, rejet, err-disable), DHCP snooping, storm control, chargement des règles nftables. Client RADIUS testé contre un serveur de test (accepté, refusé, mauvaise clé). Export Prometheus, rendu et relecture de toute la configuration.
 - Pas encore testé : RSTP avec `mstpd` sur Debian 13, le débit réel sur Atom D510, une vraie montée Debian 13 → 14, et en 1.0.3 le SPAN (le noyau de test n'a pas `tc matchall`), SNMPv3 avec `snmpd`, le RADIUS en SSH via `pam_radius_auth` et un vrai NPS.

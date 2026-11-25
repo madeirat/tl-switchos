@@ -37,7 +37,7 @@ while :; do ask tlswitch/hostname; H="$RET"
   err "Le nom ne peut contenir que des lettres, des chiffres et des tirets."; done
 while :; do ask tlswitch/mgmt_vlan; V="$RET"
   echo "$V" | grep -Eq '^[0-9]{1,4}$' && [ "$V" -ge 1 ] && [ "$V" -le 4094 ] && break
-  err "La VLAN doit être un nombre entre 1 et 4094."; done
+  err "Le VLAN doit être un nombre entre 1 et 4094."; done
 # l'adresse IP n'est PAS demandee ici : c'est l'etape reseau de Debian qui la configure
 # (DHCP, ou saisie manuelle si pas de DHCP), et late.sh la reprend pour le switch.
 # pas de mot de passe ici : le switch demarre avec admin / admin provisoire (affiche sur la

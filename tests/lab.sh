@@ -22,8 +22,8 @@ pingt h3 192.168.20.4 && ok "access VLAN 20 : Gi1/0/3 -> Gi1/0/4" || ko "access 
 pingt h3 192.168.20.5 && ko "VLAN 20 et 10 NE sont PAS isoles" || ok "isolation VLAN 20 / VLAN 10"
 pingt routeur 192.168.20.3 && ok "trunk LACP Po1 -> VLAN 20 (Gi1/0/3)" || ko "trunk LACP VLAN 20"
 pingt routeur 192.168.99.20 && ok "routeur -> SVI de gestion Vlan99" || ko "SVI via Po1"
-pingt h6 192.168.99.20 && ok "native VLAN 99 non taguee sur Gi1/0/6 -> SVI" || ko "native VLAN"
-pingt h6 192.168.20.3 && ok "VLAN 20 taguee sur Gi1/0/6" || ko "VLAN taguee sur trunk"
+pingt h6 192.168.99.20 && ok "VLAN natif 99 non tague sur Gi1/0/6 -> SVI" || ko "native VLAN"
+pingt h6 192.168.20.3 && ok "VLAN 20 tague sur Gi1/0/6" || ko "VLAN tague sur trunk"
 pingt routeur 192.168.20.6 && ok "trunk -> trunk VLAN 20" || ko "trunk -> trunk"
 grep -q "Number of ports: 2" /proc/net/bonding/po1 && ok "LACP : 2 ports agreges dans Po1" || { ko "LACP"; cat /proc/net/bonding/po1 | head -40; }
 echo "== idempotence (2e application)"
@@ -35,7 +35,7 @@ print(len(mods), mods)")
 echo "  commandes de modification lors d'une 2e application : $N"
 echo "== CLI : passer Gi1/0/4 en VLAN 10 a chaud"
 printf 'conf t\ninterface gi1/0/4\n switchport access vlan 10\nend\nshow vlan brief\nshow etherchannel summary\nshow mac address-table\nshow interfaces status\n' | python3 $T cli
-pingt h3 192.168.20.4 && ko "Gi1/0/4 toujours en VLAN 20" || ok "Gi1/0/4 sorti de la VLAN 20"
+pingt h3 192.168.20.4 && ko "Gi1/0/4 toujours en VLAN 20" || ok "Gi1/0/4 sorti du VLAN 20"
 pingt h4 192.168.20.5 && ok "Gi1/0/4 et Gi1/0/5 ensemble en VLAN 10" || ko "VLAN 10"
 echo "== retour arriere : on casse l'acces de gestion depuis une session distante, sans confirmer"
 printf 'conf t\ninterface Vlan99\n no ip address\n ip address 192.168.99.99 255.255.255.0\nend\n' | SSH_CONNECTION="192.168.99.6 5000 192.168.99.20 22" python3 -c "

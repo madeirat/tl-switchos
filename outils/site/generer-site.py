@@ -284,7 +284,7 @@ VLAN Name        Status    Ports
 
 GROUPES = [
     ("Commutation", [
-        ("VLAN 802.1Q", "Ports access et trunk, VLAN native, listes de VLAN autorisées, jusqu'à 4094 VLAN."),
+        ("VLAN 802.1Q", "Ports access et trunk, VLAN natif, listes de VLAN autorisés, jusqu'à 4094 VLAN."),
         ("Agrégats LACP", "Port-channel en LACP actif ou passif, ou statique, répartition de charge niveau 3/4."),
         ("RSTP / STP", "Spanning-tree rapide, priorité du pont, PortFast et BPDU Guard sur les ports d'extrémité."),
         ("Multicast", "IGMP snooping actif par défaut, querier intégré pour les réseaux sans routeur multicast."),
@@ -334,7 +334,7 @@ def page_fonctions(version, github):
                    "DHCP snooping, SNMPv3, RADIUS, export Prometheus.", corps, version, github, "fonctions.html")
 
 
-def page_installation(version, github):
+def page_installation(version, github, depot_url=""):
     corps = entete_doc("Installation", "De la clé USB au switch administrable, en quelques minutes.") + """
 <div class="largeur doc texte">
 <h2>Matériel</h2>
@@ -359,6 +359,13 @@ def page_installation(version, github):
 <li>TL-SwitchOS s'installe, puis la machine redémarre.</li>
 </ol>
 
+<h2>Sur une Debian déjà installée</h2>
+<p>Installe une Debian 13 minimale (amd64, sans bureau, avec le serveur SSH si tu veux), puis en root :</p>
+<pre>curl -fsSLO {d}/installer.sh
+bash installer.sh
+reboot</pre>
+<p>Le script vérifie la clé du dépôt, télécharge la dernière version, demande le nom du switch et le VLAN de gestion, puis lance le même installateur que l'ISO. L'adresse IP actuelle devient l'adresse de gestion. Les versions suivantes arrivent ensuite par <code>install update</code> ou par l'interface web.</p>
+
 <h2>Premier démarrage</h2>
 <p>L'écran de connexion affiche l'adresse du switch, mise à jour en direct :</p>
 <pre>TL-SwitchOS {v} - switch01 - console tty1
@@ -367,7 +374,7 @@ def page_installation(version, github):
 
   Identifiant provisoire :  admin
   Mot de passe provisoire : admin</pre>
-<p>À la première connexion, le switch exige un nouveau mot de passe (8 caractères minimum). Les ports sont nommés <code>Gi1/0/1</code> à <code>Gi1/0/N</code>, tous en access sur la VLAN de gestion.</p>
+<p>À la première connexion, le switch exige un nouveau mot de passe (8 caractères minimum). Les ports sont nommés <code>Gi1/0/1</code> à <code>Gi1/0/N</code>, tous en access sur le VLAN de gestion.</p>
 
 <h2>Accès</h2>
 <table class="tableau">
@@ -398,7 +405,7 @@ ip default-gateway 192.0.2.1
 end
 wr</pre>
 <p>Toutes les commandes : <a href="commandes.html">référence des commandes</a>.</p>
-</div>""".format(v=html.escape(version))
+</div>""".format(v=html.escape(version), d=html.escape(depot_url or "https://depot.exemple"))
     return gabarit("Installation · TL-SwitchOS", "Installer TL-SwitchOS depuis une clé USB : matériel, étapes, "
                    "premier démarrage et première configuration.", corps, version, github, "installation.html")
 
@@ -548,7 +555,7 @@ def main():
     ecrire(www, "index.html", page(version, telechargements(tele), versions, depot_url, captures,
                                    time.strftime("%d/%m/%Y à %H:%M"), github))
     ecrire(www, "fonctions.html", page_fonctions(version, github))
-    ecrire(www, "installation.html", page_installation(version, github))
+    ecrire(www, "installation.html", page_installation(version, github, depot_url))
     ecrire(www, "commandes.html", page_commandes(version, github, depot))
     ecrire(www, "mises-a-jour.html", page_maj(version, github))
     ecrire(www, "notes-de-version.html", page_versions(version, github, versions))

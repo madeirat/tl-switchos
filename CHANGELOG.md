@@ -3,7 +3,18 @@
 ## 1.0.4
 
 - **Installation** : le disque est toujours choisi à la main, y compris en console série. L'installateur demande quel disque utiliser et comment le partitionner (guidé ou manuel) ; rien n'est effacé sans confirmation. GRUB s'installe sur le disque choisi.
+- Avant le partitionnement, l'installateur liste les disques avec leur taille et signale la clé d'installation, à ne pas choisir.
 - Le mode sans question (`tlsauto`) garde le partitionnement automatique quand il n'y a qu'un seul disque.
+- **Installation sur une Debian 13 déjà installée** : `curl -fsSLO https://deb.tech-linux.fr/tlswitchos/installer.sh && bash installer.sh`. Le script vérifie la clé du dépôt, prend la dernière version, pose les deux questions du switch et lance le même installateur que l'ISO.
+- Commande `clear` (ou `clear screen`) pour effacer l'écran de la CLI.
+- **Sécurité** :
+  - `show running-config`, `show startup-config` et le téléchargement de la configuration sur le web demandent le niveau 15. Un compte en lecture ne voit plus les mots de passe hachés, la communauté SNMP ni la clé RADIUS.
+  - Web : une session suit la configuration (compte supprimé = session fermée, niveau baissé = droits baissés tout de suite). Changer son mot de passe ferme ses autres sessions. Erreurs internes non détaillées au navigateur.
+  - Web : plus d'en-tête HSTS (inadapté à un certificat auto-signé, Chrome refusait alors l'accès). Nouveau certificat avec SAN et usages, refait automatiquement s'il est d'un ancien modèle.
+  - SSH : redirections de ports, d'agent et X11 interdites (un compte ne peut plus se servir du switch comme rebond vers les VLAN), connexions simultanées limitées.
+  - Comptes : 8 caractères minimum, noms de comptes système Linux refusés, serveur NTP vérifié (adresse IP ou nom).
+- Textes : « un VLAN » au masculin partout.
+- Sans `mstpd`, l'avertissement « RSTP remplacé par STP classique » ne s'affiche plus qu'une fois par démarrage (et dans `show version`), au lieu de chaque commande.
 
 ## 1.0.3
 

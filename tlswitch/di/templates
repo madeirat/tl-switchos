@@ -1,7 +1,7 @@
 Template: tlswitch/intro
 Type: note
 Description: Configuration de TL-SwitchOS
- Deux questions pour préparer le switch : son nom et sa VLAN de gestion. L'adresse IP est configurée ensuite par l'étape réseau de l'installateur (DHCP, ou saisie manuelle) et reprise telle quelle par le switch. Compte de départ : admin / admin, à changer à la première connexion. Tout reste modifiable ensuite en CLI ou dans l'interface web.
+ Deux questions pour préparer le switch : son nom et son VLAN de gestion. L'adresse IP est configurée ensuite par l'étape réseau de l'installateur (DHCP, ou saisie manuelle) et reprise telle quelle par le switch. Compte de départ : admin / admin, à changer à la première connexion. Tout reste modifiable ensuite en CLI ou dans l'interface web.
 
 Template: tlswitch/hostname
 Type: string
@@ -13,7 +13,7 @@ Template: tlswitch/mgmt_vlan
 Type: string
 Default: 1
 Description: VLAN de gestion :
- VLAN qui porte l'adresse IP d'administration du switch. Au départ, tous les ports sont en access dans cette VLAN. Mets 1 si tu ne sais pas.
+ VLAN qui porte l'adresse IP d'administration du switch. Au départ, tous les ports sont en access dans ce VLAN. Mets 1 si tu ne sais pas.
 
 Template: tlswitch/ip
 Type: string
@@ -24,7 +24,7 @@ Description: Adresse IP de gestion :
 Template: tlswitch/gateway
 Type: string
 Description: Passerelle :
- Routeur de la VLAN de gestion (ton routeur), par exemple 192.168.1.1.
+ Routeur du VLAN de gestion (ton routeur), par exemple 192.168.1.1.
 
 Template: tlswitch/dns
 Type: string
@@ -49,3 +49,10 @@ Description: Valeur incorrecte
 Template: tlswitch/progress
 Type: text
 Description: ${STEP}
+
+Template: tlswitch/disques
+Type: note
+Description: Choix du disque
+ Disques vus : ${LISTE}
+ .
+ ${CLE}A l'etape suivante, choisis le disque interne du switch. Le disque choisi sera efface apres confirmation.

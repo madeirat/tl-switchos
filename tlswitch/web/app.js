@@ -79,7 +79,7 @@ function statusPill(p) { const [t, c] = STATUS[p.status] || [p.status, ""]; retu
 function vlanLabel(p) {
   if (p.cg) return "Membre de Po" + p.cg;
   if (p.mode === "access") return h("span", { class: "vchip" }, h("i", { style: "background:" + vcolor(p.access) }), "VLAN " + p.access);
-  return h("span", { class: "vchip" }, h("i", { style: "background:var(--blue2)" }), "Trunk " + (p.vlans || "aucune") + (p.native ? " (native " + p.native + ")" : ""));
+  return h("span", { class: "vchip" }, h("i", { style: "background:var(--blue2)" }), "Trunk " + (p.vlans || "aucun") + (p.native ? " (natif " + p.native + ")" : ""));
 }
 
 /* ---------- API ---------- */
@@ -356,7 +356,7 @@ function portTable(compact) {
   return h("table", {}, h("thead", {}, h("tr", {}, heads.map((x) => h("th", { class: ["Entrée", "Sortie", "Total", "Erreurs"].includes(x) ? "num" : "" }, x)))), h("tbody", {}, rows));
 }
 VIEWS.ports = () => {
-  const search = h("input", { placeholder: "Rechercher un port, une description, une VLAN", value: PORT_Q });
+  const search = h("input", { placeholder: "Rechercher un port, une description, un VLAN", value: PORT_Q });
   const box = h("div", { class: "tablewrap" }, portTable(false));
   search.addEventListener("input", () => { PORT_Q = search.value; box.replaceChildren(portTable(false)); });
   const seg = h("div", { class: "seg" }, [["all", "Tous"], ["up", "Connectés"], ["down", "Sans lien"], ["trunk", "Trunks"]].map(([k, t]) =>
@@ -372,7 +372,7 @@ function editPort(p) {
   }
   const desc = h("input", { value: p.desc, maxlength: 64, placeholder: "ex : Point d'acces" });
   const state = sel([["up", "Activé"], ["down", "Désactivé (shutdown)"]], p.shutdown ? "down" : "up");
-  const mode = sel([["access", "Access : une seule VLAN, non taguée (poste, imprimante, caméra)"], ["trunk", "Trunk 802.1Q : plusieurs VLAN taguées (switch, borne, routeur)"]], p.mode);
+  const mode = sel([["access", "Access : un seul VLAN, non tagué (poste, imprimante, caméra)"], ["trunk", "Trunk 802.1Q : plusieurs VLAN tagués (switch, borne, routeur)"]], p.mode);
   const vlanOpts = ST.vlans.map((v) => [v.id, v.id + " - " + v.name]);
   const acc = sel(vlanOpts, p.access);
   const allowed = h("input", { value: p.allowed === null ? "all" : (p.allowed.length ? compress(p.allowed) : "none"), placeholder: "all, none ou 10,20-30" });
@@ -381,7 +381,7 @@ function editPort(p) {
   const bg = h("input", { type: "checkbox", checked: p.bpduguard });
   const mtu = h("input", { type: "number", min: 68, max: 9216, value: p.mtu || "", placeholder: "1500 par défaut" });
   const accBox = h("div", {}, field("VLAN d'accès", acc));
-  const trBox = h("div", {}, field("VLAN autorisées", allowed, "all = toutes, none = aucune, ou une liste comme 10,20-30"), field("VLAN native (non taguée)", native));
+  const trBox = h("div", {}, field("VLAN autorisés", allowed, "all = tous, none = aucun, ou une liste comme 10,20-30"), field("VLAN natif (non tagué)", native));
   const l2 = h("div", {}, field("Mode", mode), accBox, trBox,
     h("label", { class: "check" }, pf, "PortFast : le port s'active tout de suite (vers un poste ou un serveur)"),
     h("label", { class: "check" }, bg, "BPDU Guard : coupe le port si un autre switch y est branché"));
@@ -420,7 +420,7 @@ function editPort(p) {
   }, "Appliquer", top);
 }
 
-/* matrice port x VLAN : U = non tagué (access ou native), T = tagué, vide = absent */
+/* matrice port x VLAN : U = non tagué (access ou natif), T = tagué, vide = absent */
 let VPEND = {};
 function vlanState(p, vid) {
   if (VPEND[p.name] && vid in VPEND[p.name]) return VPEND[p.name][vid];
@@ -438,8 +438,8 @@ function vlanCmds() {
     const p = ST.ports.find((x) => x.name === name); if (!p) continue;
     const st = vlanTarget(p);
     const U = Object.keys(st).filter((v) => st[v] === "U").map(Number), T = Object.keys(st).filter((v) => st[v] === "T").map(Number);
-    if (U.length > 1) { errs.push(p.disp + " : une seule VLAN non taguée (U) par port"); continue; }
-    if (!U.length && !T.length) { errs.push(p.disp + " : au moins une VLAN"); continue; }
+    if (U.length > 1) { errs.push(p.disp + " : un seul VLAN non tagué (U) par port"); continue; }
+    if (!U.length && !T.length) { errs.push(p.disp + " : au moins un VLAN"); continue; }
     const c = [];
     if (!T.length) {
       if (p.mode !== "access") c.push(" switchport mode access");
@@ -448,7 +448,7 @@ function vlanCmds() {
       if (p.mode !== "trunk") c.push(" switchport mode trunk");
       c.push(" switchport trunk allowed vlan " + compress(T.concat(U)));
       if (U.length) { if (p.native !== U[0] || p.mode !== "trunk") c.push(" switchport trunk native vlan " + U[0]); }
-      else if (T.includes(p.native)) { errs.push(p.disp + " : la VLAN native " + p.native + " doit rester non taguée (U) ou être retirée"); continue; }
+      else if (T.includes(p.native)) { errs.push(p.disp + " : le VLAN natif " + p.native + " doit rester non tagué (U) ou être retiré"); continue; }
     }
     if (c.length) out.push("interface " + p.long, ...c);
   }
@@ -475,24 +475,24 @@ VIEWS.vlans = () => {
       h("td", { class: "vl" }, h("span", { class: "vchip" }, h("i", { style: "background:" + vcolor(v.id) }), h("b", {}, v.id), " ", h("span", { class: "muted" }, v.name))),
       cols.map((p) => {
         const st = vlanState(p, v.id), chg = VPEND[p.name] && v.id in VPEND[p.name];
-        return h("td", {}, h("button", { class: "cell " + st + (chg ? " chg" : ""), disabled: !isAdmin() || null, title: p.disp + " / VLAN " + v.id + " : " + (st === "U" ? "non taguée" : st === "T" ? "taguée" : "absente") + " (clic pour changer)", onclick: () => cycle(p, v.id) }, st || "·"));
+        return h("td", {}, h("button", { class: "cell " + st + (chg ? " chg" : ""), disabled: !isAdmin() || null, title: p.disp + " / VLAN " + v.id + " : " + (st === "U" ? "non tagué" : st === "T" ? "tagué" : "absent") + " (clic pour changer)", onclick: () => cycle(p, v.id) }, st || "·"));
       }),
       h("td", { style: "text-align:right;white-space:nowrap" }, isAdmin() ? [
-        h("button", { class: "btn small ghost", onclick: () => { const n = prompt("Nouveau nom de la VLAN " + v.id, v.name); if (n) sendCmds(["vlan " + v.id, " name " + n.trim().replace(/\s+/g, "_")]); } }, "Renommer"),
-        v.id !== 1 ? h("button", { class: "btn small ghost", style: "color:var(--red)", onclick: () => { if (confirm("Supprimer la VLAN " + v.id + " ?")) sendCmds(["no vlan " + v.id], "VLAN supprimée"); } }, "Supprimer") : null] : null)))));
+        h("button", { class: "btn small ghost", onclick: () => { const n = prompt("Nouveau nom du VLAN " + v.id, v.name); if (n) sendCmds(["vlan " + v.id, " name " + n.trim().replace(/\s+/g, "_")]); } }, "Renommer"),
+        v.id !== 1 ? h("button", { class: "btn small ghost", style: "color:var(--red)", onclick: () => { if (confirm("Supprimer le VLAN " + v.id + " ?")) sendCmds(["no vlan " + v.id], "VLAN supprimé"); } }, "Supprimer") : null] : null)))));
   const [cmds, errs] = vlanCmds();
   return h("div", {},
     h("div", { class: "card" }, h("div", { class: "card-h" }, h("h3", {}, "Appartenance des ports aux VLAN"),
       h("div", { class: "r" }, h("span", { class: "pill ok" }, "U non taguée"), h("span", { class: "pill info" }, "T taguée"))),
-      h("p", { class: "muted", style: "margin-top:0" }, "Clique sur une case pour passer de absente à taguée (T) puis non taguée (U). Un port avec une seule VLAN U devient un port access, un port avec des VLAN T devient un trunk. Les membres d'agrégat se règlent sur la colonne Po."),
+      h("p", { class: "muted", style: "margin-top:0" }, "Clique sur une case pour passer de absent à tagué (T) puis non tagué (U). Un port avec un seul VLAN U devient un port access, un port avec des VLAN T devient un trunk. Les membres d'agrégat se règlent sur la colonne Po."),
       h("div", { class: "tablewrap" }, matrix),
       nPend ? h("div", { class: "pendbar" }, h("b", {}, nPend + " changement(s)"),
         errs.length ? h("span", { class: "bad", style: "color:var(--red)" }, errs.join(" · ")) : h("span", { class: "muted" }, cmds.length / 2 > 0 ? "" : ""),
         h("div", { style: "margin-left:auto;display:flex;gap:8px" },
           h("button", { class: "btn", onclick: () => { VPEND = {}; render(); } }, "Annuler"),
           h("button", { class: "btn primary", disabled: errs.length ? true : null, onclick: () => openModal("Appliquer les changements de VLAN", h("div", {}), () => cmds, "Appliquer") }, "Vérifier et appliquer"))) : null),
-    isAdmin() ? h("div", { class: "card" }, h("h3", {}, "Créer une VLAN"), h("div", { class: "row" }, field("Numéro", id), field("Nom", name),
-      h("button", { class: "btn primary", onclick: () => { if (!id.value.trim()) return; const c = ["vlan " + id.value.trim()]; if (name.value.trim()) c.push(" name " + name.value.trim().replace(/\s+/g, "_")); sendCmds(c, "VLAN créée"); } }, "Créer"))) : null);
+    isAdmin() ? h("div", { class: "card" }, h("h3", {}, "Créer un VLAN"), h("div", { class: "row" }, field("Numéro", id), field("Nom", name),
+      h("button", { class: "btn primary", onclick: () => { if (!id.value.trim()) return; const c = ["vlan " + id.value.trim()]; if (name.value.trim()) c.push(" name " + name.value.trim().replace(/\s+/g, "_")); sendCmds(c, "VLAN créé"); } }, "Créer"))) : null);
 };
 const _sendCmds = sendCmds;
 // apres un envoi reussi depuis la matrice, on vide les changements en attente
@@ -512,7 +512,7 @@ VIEWS.lag = () => {
   return h("div", {}, h("div", { class: "card tablewrap" }, pos.length ? h("table", {}, h("thead", {}, h("tr", {}, ["Agrégat", "Description", "État", "Membres", "VLAN", ""].map((x) => h("th", {}, x)))),
       h("tbody", {}, pos.map((p) => h("tr", {}, h("td", {}, h("b", {}, p.disp)), h("td", {}, p.desc),
         h("td", {}, h("span", { class: "badge " + (p.status === "connected" ? "ok" : "") }, p.status)), h("td", {}, p.members.join(", ")),
-        h("td", {}, p.mode === "access" ? "access " + p.access : "trunk " + (p.vlans || "aucune")),
+        h("td", {}, p.mode === "access" ? "access " + p.access : "trunk " + (p.vlans || "aucun")),
         h("td", { style: "text-align:right;white-space:nowrap" }, h("button", { class: "btn small", onclick: () => editPort(p) }, "Configurer"), " ",
           isAdmin() ? h("button", { class: "btn small danger", onclick: () => { if (confirm("Supprimer " + p.disp + " ? Les membres redeviennent des ports simples.")) sendCmds(["no interface " + p.long]); } }, "Supprimer") : null)))))
       : h("p", { class: "muted" }, "Aucun agrégat.")),

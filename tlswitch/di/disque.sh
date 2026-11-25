@@ -43,6 +43,23 @@ set -- $DISQUES
 logger -t tlswitch "disques trouves :$DISQUES (support : ${SRC:-aucun})"
 if ! grep -qw tlsauto /proc/cmdline; then
   # cas normal : partman pose les questions (disque, guide ou manuel).
+  # Avant : liste des disques avec leur taille, et la cle d'installation signalee
+  # (la choisir efface le support : formatage refuse puis installation cassee).
+  LISTE=""
+  for b in /sys/block/*; do
+    n=${b##*/}
+    case "$n" in loop*|ram*|sr*|fd*|zram*|md*|dm-*|mmcblk*boot*|nbd*) continue ;; esac
+    t=$(cat "$b/size" 2>/dev/null); [ "${t:-0}" -gt 0 ] || continue; t=$(( t / 2097152 ))
+    m=$(cat "$b/device/model" 2>/dev/null | sed 's/ *$//')
+    e="$n $t Go${m:+ $m}"
+    [ "$n" = "$SRC" ] && e="$e = CLE D'INSTALLATION, NE PAS CHOISIR"
+    LISTE="${LISTE:+$LISTE ; }$e"
+  done
+  debconf-loadtemplate tlswitch $S/di/templates 2>/dev/null || true
+  db_subst tlswitch/disques LISTE "${LISTE:-aucun}"
+  if [ -n "$SRC" ]; then db_subst tlswitch/disques CLE "Ne choisis pas $SRC : c'est la cle d'installation. "
+  else db_subst tlswitch/disques CLE ""; fi
+  db_fset tlswitch/disques seen false; db_input critical tlswitch/disques || true; db_go || true
   # GRUB (BIOS) doit aller sur le disque choisi, pas sur le premier trouve :
   # apres l'installation de base, on lit le disque qui porte /target (ou /target/boot).
   mkdir -p /usr/lib/post-base-installer.d

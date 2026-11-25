@@ -13,6 +13,43 @@ install -d -m 755 $VAR
 # commande tlswitch (lien vers la version active)
 ln -sf $LIB/tlswitch.py /usr/local/sbin/tlswitch
 
+# SSH : pas de root, pas de redirection de ports/agent/X11 (un compte lecture ne doit pas
+# pouvoir se servir du switch comme rebond vers les VLAN), sessions surveillees
+if [ -d /etc/ssh/sshd_config.d ]; then
+  cat > /etc/ssh/sshd_config.d/tlswitch.conf <<'EOS'
+PermitRootLogin no
+MaxAuthTries 3
+LoginGraceTime 30
+MaxStartups 10:30:60
+ClientAliveInterval 30
+ClientAliveCountMax 4
+DisableForwarding yes
+PermitTunnel no
+PermitUserEnvironment no
+PrintMotd no
+PrintLastLog no
+EOS
+  if ! sshd -t 2>/dev/null; then
+    # OpenSSH trop ancien pour DisableForwarding : equivalent en trois lignes
+    sed -i '/^DisableForwarding/d' /etc/ssh/sshd_config.d/tlswitch.conf
+    printf 'AllowTcpForwarding no\nX11Forwarding no\nAllowAgentForwarding no\n' >> /etc/ssh/sshd_config.d/tlswitch.conf
+  fi
+  sshd -t 2>/dev/null && systemctl reload ssh 2>/dev/null || true
+fi
+
+# certificat HTTPS d'un ancien modele (sans SAN, que Chrome refuse) : refait
+E=/etc/tlswitch
+if [ -f $E/web.crt ] && ! openssl x509 -in $E/web.crt -noout -ext subjectAltName 2>/dev/null | grep -q DNS; then
+  H=$(hostname 2>/dev/null || echo tl-switch)
+  if openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=$H/O=TECH-LINUX" \
+      -addext "subjectAltName=DNS:$H,DNS:$H.local" -addext "basicConstraints=critical,CA:FALSE" \
+      -addext "keyUsage=critical,digitalSignature,keyEncipherment" -addext "extendedKeyUsage=serverAuth" \
+      -keyout $E/web.key.new -out $E/web.crt.new 2>/dev/null; then
+    chmod 600 $E/web.key.new; mv $E/web.key.new $E/web.key; mv $E/web.crt.new $E/web.crt
+    systemctl try-restart tlswitch-web.service 2>/dev/null || true
+  fi
+fi
+
 # secours : si la version active ne demarre pas, retour automatique (une fois)
 # a la version precedente, puis redemarrage du switch avec elle.
 cat > /usr/local/sbin/tlswitch-secours <<'EOS'

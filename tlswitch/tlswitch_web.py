@@ -45,13 +45,36 @@ def new_session(user, priv, must_change=False):
 
 
 def get_session(sid):
+    if not sid:
+        return None
+    now = time.time()
     with LOCK:
+        for k in [k for k, v in SESSIONS.items() if v["exp"] < now]:
+            SESSIONS.pop(k, None)
         s = SESSIONS.get(sid)
-        if not s or s["exp"] < time.time():
+        if not s:
+            return None
+    # compte supprime ou niveau change depuis la connexion : la session suit la config
+    try:
+        u = T.load_running()[0].users.get(s["user"])
+    except Exception:
+        u = None
+    with LOCK:
+        if not u:
             SESSIONS.pop(sid, None)
             return None
-        s["exp"] = time.time() + SESSION_TTL
+        if u[0] != s["priv"]:
+            s["priv"] = u[0]
+            s["console"] = None
+        s["exp"] = now + SESSION_TTL
         return s
+
+
+def fermer_sessions(user, sauf=None):
+    """Mot de passe change : les autres sessions web de ce compte sont fermees."""
+    with LOCK:
+        for k in [k for k, v in SESSIONS.items() if v["user"] == user and k != sauf]:
+            SESSIONS.pop(k, None)
 
 
 def throttled(ip):
@@ -65,6 +88,8 @@ def throttled(ip):
 
 def fail(ip):
     with LOCK:
+        if len(FAILS) > 10000:               # memoire bornee
+            FAILS.clear()
         n, t0 = FAILS.get(ip, [0, time.time()])
         FAILS[ip] = [n + 1, t0]
 
@@ -73,7 +98,7 @@ def fail(ip):
 # Donnees
 # ---------------------------------------------------------------------------
 
-def state():
+def state(priv=15):
     m, errs = T.load_running()
     links = T.link_table()
     stp = T.stp_states()
@@ -119,7 +144,7 @@ def state():
         "svis": [{"vid": v, "addresses": s.addresses, "dhcp": s.dhcp, "desc": s.description,
                   "shutdown": s.shutdown} for v, s in sorted(m.svis.items())],
         "ips": ips, "gateway": m.gateway, "dns": m.dns, "ntp": m.ntp, "stp_mode": m.stp_mode,
-        "stp_priority": m.stp_priority, "lldp": m.lldp, "snmp": m.snmp_community or "",
+        "stp_priority": m.stp_priority, "lldp": m.lldp, "snmp": (m.snmp_community or "") if priv >= 15 else ("***" if m.snmp_community else ""),
         "snmp_location": m.snmp_location, "users": [{"name": u, "priv": v[0]} for u, v in sorted(m.users.items())],
         "unsaved": T.unsaved(), "rollback": T.rollback_pending(), "errors": errs,
     }
@@ -185,7 +210,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
     def headers_common(self):
-        self.send_header("Strict-Transport-Security", "max-age=31536000")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -214,7 +238,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def body(self):
         n = int(self.headers.get("Content-Length") or 0)
-        if n > 1_000_000:
+        if n < 0 or n > 1_000_000:
             raise ValueError("trop gros")
         raw = self.rfile.read(n) if n else b"{}"
         return json.loads(raw.decode() or "{}")
@@ -224,7 +248,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not s:
             self.send(401, {"error": "non connecte"})
             return None
-        if self.command == "POST" and self.headers.get("X-CSRF") != s["csrf"]:
+        if self.command == "POST" and not secrets.compare_digest(self.headers.get("X-CSRF") or "", s["csrf"]):
             self.send(403, {"error": "jeton CSRF invalide"})
             return None
         if s.get("must_change") and urllib.parse.urlparse(self.path).path != "/api/password":
@@ -255,7 +279,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         try:
             if path == "/api/state":
-                return self.send(200, state())
+                return self.send(200, state(s["priv"]))
             if path == "/api/mac":
                 return self.send(200, [{"vlan": v, "mac": mac, "type": t, "port": T.disp_if(p or "")}
                                        for v, mac, t, p in T.mac_rows()])
@@ -264,6 +288,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 for r in rows:
                     r["local"] = T.disp_if(r["local"] or "")
                 return self.send(200, rows)
+            if path in ("/api/running", "/api/download") and s["priv"] < 15:
+                return self.send(403, {"error": "niveau 15 requis"})
             if path == "/api/running":
                 m, _ = T.load_running()
                 return self.send(200, m.render(), "text/plain")
@@ -296,7 +322,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send(200, out.getvalue(), "text/plain")
         except Exception as e:      # le web ne doit jamais tomber
             T.log("web : erreur %s" % e)
-            return self.send(500, {"error": str(e)})
+            return self.send(500, {"error": "erreur interne (voir show logging)"})
         self.send(404, {"error": "introuvable"})
 
     def static(self, name, ctype):
@@ -335,7 +361,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/logout":
             with LOCK:
                 SESSIONS.pop(self.sid(), None)
-            return self.send(200, {"ok": True}, extra={"Set-Cookie": "tlsid=; Path=/; Max-Age=0; Secure"})
+            return self.send(200, {"ok": True}, extra={"Set-Cookie": "tlsid=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict"})
         try:
             if path == "/api/password":
                 s = self.auth()
@@ -354,6 +380,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     except T.CliError as e:
                         return self.send(200, {"error": str(e).lstrip("% ")})
                     s["must_change"] = False
+                    fermer_sessions(s["user"], sauf=self.sid())
                     self.send(200, {"ok": True})
                 return
             if path == "/api/config":
@@ -429,7 +456,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
         except Exception as e:
             T.log("web : erreur %s" % e)
-            return self.send(500, {"error": str(e)})
+            return self.send(500, {"error": "erreur interne (voir show logging)"})
         self.send(404, {"error": "introuvable"})
 
 

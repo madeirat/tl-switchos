@@ -223,9 +223,12 @@ fi
 
 # -----------------------------------------------------------------------------
 say "5/9 Certificat HTTPS"
+# (certificat moderne : SAN, usages ; refait par maj.sh s'il est d'un ancien modele)
 if [ ! -f $ETC/web.crt ]; then
-  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=$HOSTNAME_NEW/O=TECH-LINUX" \
-    -keyout $ETC/web.key -out $ETC/web.crt 2>/dev/null
+  openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=$HOSTNAME_NEW/O=TECH-LINUX" \
+    -addext "subjectAltName=DNS:$HOSTNAME_NEW,DNS:$HOSTNAME_NEW.local" \
+    -addext "basicConstraints=critical,CA:FALSE" -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+    -addext "extendedKeyUsage=serverAuth" -keyout $ETC/web.key -out $ETC/web.crt 2>/dev/null
   chmod 600 $ETC/web.key
 fi
 
@@ -291,15 +294,7 @@ for u in tlswitch.service tlswitch-web.service tlswitch-guard.timer ssh lldpd ms
 done
 
 # SSH : pas de root, sessions surveillees
-cat > /etc/ssh/sshd_config.d/tlswitch.conf <<'EOF'
-PermitRootLogin no
-MaxAuthTries 3
-LoginGraceTime 30
-ClientAliveInterval 30
-ClientAliveCountMax 4
-PrintMotd no
-PrintLastLog no
-EOF
+# (reglages SSH ecrits par maj.sh, rejoue a chaque mise a jour)
 : > /etc/motd
 
 # integration commune avec les mises a jour (secours au demarrage, etc.)

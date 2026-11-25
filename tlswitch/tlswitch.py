@@ -225,8 +225,8 @@ def parse_secret(text):
         if not re.fullmatch(r"\$6\$[./A-Za-z0-9]{1,16}\$[./A-Za-z0-9]{86}", val):
             raise CliError("% Hash invalide (attendu : $6$...)")
         return val
-    if len(val) < 6:
-        raise CliError("% Secret trop court (6 caracteres minimum)")
+    if len(val) < 8:
+        raise CliError("% Secret trop court (8 caracteres minimum)")
     return hash_secret(val)
 
 
@@ -241,7 +241,7 @@ class Port:
         self.shutdown = False
         self.mode = "access"
         self.access_vlan = 1
-        self.allowed = None          # None = toutes les VLAN definies
+        self.allowed = None          # None = tous les VLAN definis
         self.native = 1
         self.channel_group = None
         self.lacp_mode = "active"
@@ -688,11 +688,11 @@ def c_vlan(s, lst):
 def c_no_vlan(s, lst):
     for v in parse_vlan_list(lst):
         if v == 1:
-            raise CliError("% La VLAN 1 ne peut pas etre supprimee")
+            raise CliError("% Le VLAN 1 ne peut pas etre supprime")
         s.m.vlans.pop(v, None)
 
 
-@CONF_VLAN.add("name <nom>", "Nom de la VLAN")
+@CONF_VLAN.add("name <nom>", "Nom du VLAN")
 def cv_name(s, name):
     for v in s.ctx:
         s.m.vlans[v] = name
@@ -768,6 +768,11 @@ def c_no_dns(s):
 
 @CONF.add("ntp server <ip>", "Serveur NTP")
 def c_ntp(s, ip):
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        if not re.fullmatch(r"(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,62})(\.[A-Za-z0-9]([A-Za-z0-9-]{0,62}))*\.?", ip):
+            raise CliError("% Adresse ou nom de serveur NTP invalide")
     if ip not in s.m.ntp:
         s.m.ntp.append(ip)
 
@@ -824,12 +829,29 @@ def c_no_snmp(s):
     s.m.snmp_community = None
 
 
+def compte_systeme(name):
+    """Compte Linux du systeme (uid < 1000, hors comptes du switch) : jamais repris par la CLI."""
+    if name in ("root", "daemon", "bin", "sys", "www-data", "sshd", "nobody"):
+        return True
+    try:
+        import pwd
+        import grp
+        e = pwd.getpwnam(name)
+    except (KeyError, ImportError):
+        return False
+    try:
+        membres = set(grp.getgrnam("tlswitch").gr_mem)
+    except KeyError:
+        membres = set()
+    return e.pw_uid < 1000 and name not in membres
+
+
 @CONF.add("username <nom> privilege <1|15> secret <...>", "Compte SSH/web (secret 0 <clair> ou 5 <hash>)")
 def c_username(s, name, priv, secret):
     if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,30}", name):
         raise CliError("% Nom de compte invalide (minuscules, chiffres, - _)")
-    if name in ("root", "daemon", "bin", "sys", "www-data", "sshd", "nobody"):
-        raise CliError("% Nom reserve")
+    if compte_systeme(name) and name not in s.m.users:
+        raise CliError("% Nom reserve (compte du systeme)")
     priv = int(priv)
     if priv not in (1, 15):
         raise CliError("% privilege 1 (lecture) ou 15 (admin)")
@@ -860,8 +882,8 @@ def local_admins(m):
 def c_username_radius(s, name, priv):
     if not re.fullmatch(r"[a-z_][a-z0-9_.-]{0,30}", name):
         raise CliError("% Nom de compte invalide (minuscules, chiffres, . - _)")
-    if name in ("root", "daemon", "bin", "sys", "www-data", "sshd", "nobody"):
-        raise CliError("% Nom reserve")
+    if compte_systeme(name) and name not in s.m.users:
+        raise CliError("% Nom reserve (compte du systeme)")
     priv = int(priv)
     if priv not in (1, 15):
         raise CliError("% privilege 1 (lecture) ou 15 (admin)")
@@ -1396,20 +1418,20 @@ def ci_mode(s, mode):
 def ci_access(s, vid):
     v = parse_vlan_list(vid)
     if len(v) != 1:
-        raise CliError("% Une seule VLAN")
+        raise CliError("% Un seul VLAN")
     v = v.pop()
     s.m.vlans.setdefault(v, "VLAN%04d" % v)
     for p in ports_of(s):
         p.access_vlan = v
 
 
-@CONF_IF.add("no switchport access vlan", "Remettre la VLAN 1")
+@CONF_IF.add("no switchport access vlan", "Remettre le VLAN 1")
 def ci_no_access(s):
     for p in ports_of(s):
         p.access_vlan = 1
 
 
-@CONF_IF.add("switchport trunk allowed vlan <liste>", "VLAN autorisees (liste, all ou none)")
+@CONF_IF.add("switchport trunk allowed vlan <liste>", "VLAN autorises (liste, all ou none)")
 def ci_allowed(s, lst):
     for p in ports_of(s):
         if lst.lower() == "all":
@@ -1435,11 +1457,11 @@ def ci_allowed_rm(s, lst):
         p.allowed -= parse_vlan_list(lst)
 
 
-@CONF_IF.add("switchport trunk native vlan <vid>", "VLAN native (non taguee)")
+@CONF_IF.add("switchport trunk native vlan <vid>", "VLAN natif (non tague)")
 def ci_native(s, vid):
     v = parse_vlan_list(vid)
     if len(v) != 1:
-        raise CliError("% Une seule VLAN")
+        raise CliError("% Un seul VLAN")
     v = v.pop()
     s.m.vlans.setdefault(v, "VLAN%04d" % v)
     for p in ports_of(s):
@@ -1804,7 +1826,15 @@ class Applier:
                 self.run("ip link set %s address %s" % (BRIDGE, mac), ignore=True)
         use_mstpd = m.stp_mode == "rstp" and (self.dry or shutil.which("mstpctl"))
         if m.stp_mode == "rstp" and not use_mstpd:
-            self.warn.append("mstpd absent : RSTP remplace par STP classique (apt install mstpd)")
+            # une seule fois par demarrage (pas a chaque commande) ; rappel dans show version
+            marque = os.path.join(RUN, "mstpd-absent")
+            if not os.path.exists(marque):
+                self.warn.append("mstpd absent : RSTP remplace par STP classique (apt install mstpd)")
+                try:
+                    os.makedirs(RUN, exist_ok=True)
+                    open(marque, "w").close()
+                except OSError:
+                    pass
         if use_mstpd:
             self.run("systemctl start --no-block mstpd", ignore=True)
         # avec mstpd, stp_state 1 passe la main au demon (via /sbin/bridge-stp)
@@ -2012,6 +2042,9 @@ class Applier:
             members = set()
         tlsh = shutil.which("tlsh") or "/usr/local/bin/tlsh"
         for u, (priv, h) in m.users.items():
+            if compte_systeme(u):
+                self.warn.append("compte %s ignore : c'est un compte du systeme" % u)
+                continue
             try:
                 pw = pwd.getpwnam(u)
                 if pw.pw_shell != tlsh:
@@ -2728,7 +2761,7 @@ def metrics_text(m):
     fam("tlswitch_mac_entries", "gauge", "Adresses MAC apprises par port")
     for name, p, l, st, lab in rows:
         out.append("tlswitch_mac_entries{%s} %d" % (lab, macs.get(name, 0)))
-    fam("tlswitch_vlans", "gauge", "Nombre de VLAN definies")
+    fam("tlswitch_vlans", "gauge", "Nombre de VLAN definis")
     out.append("tlswitch_vlans %d" % len(m.vlans))
     return "\n".join(out) + "\n"
 
@@ -3043,6 +3076,7 @@ def port_vlan_label(m, name):
 
 
 @EXEC.add("show running-config", "Configuration active")
+@priv15
 def x_run(s):
     s.say(s.m.render().rstrip())
 
@@ -3063,6 +3097,7 @@ def x_run_if(s, text):
 
 
 @EXEC.add("show startup-config", "Configuration au demarrage")
+@priv15
 def x_start(s):
     if os.path.exists(STARTUP):
         s.say(open(STARTUP).read().rstrip())
@@ -3334,6 +3369,8 @@ def x_version(s):
     prev = lib_version(PREV)
     if prev:
         s.say("Previous software : %s (install rollback pour y revenir)" % prev)
+    if s.m.stp_mode == "rstp" and not shutil.which("mstpctl"):
+        s.say("Spanning tree : STP classique (mstpd absent pour RSTP : apt install mstpd)")
 
 
 @EXEC.add("show clock", "Date et heure")
@@ -3435,7 +3472,7 @@ def x_dhcps(s):
     s.say("DHCP snooping : %s" % ("actif" if m.dhcp_snooping else "inactif"))
     if not m.dhcp_snooping:
         return
-    s.say("VLAN surveillees : %s" % (fmt_vlan_list(m.dhcp_snooping_vlans) if m.dhcp_snooping_vlans else "toutes"))
+    s.say("VLAN surveillees : %s" % (fmt_vlan_list(m.dhcp_snooping_vlans) if m.dhcp_snooping_vlans else "tous"))
     cnt = nft_counters()
     s.say("%-9s %-8s %s" % ("Port", "Trust", "Reponses DHCP jetees"))
     for name in m.bridge_ports():
@@ -3714,6 +3751,17 @@ def x_shell(s):
         raise CliError("% Indisponible ici")
     log("shell Linux ouvert par %s" % s.user)
     subprocess.call(["/bin/bash", "-l"])
+
+
+@EXEC.add("clear", "Effacer l'ecran")
+@EXEC.add("clear screen", "Effacer l'ecran")
+def x_clear(s):
+    try:
+        if s.out.isatty():
+            s.out.write("\033[H\033[2J\033[3J")
+            s.out.flush()
+    except (AttributeError, ValueError, OSError):
+        pass
 
 
 @EXEC.add("terminal length <n>", "Accepte")
@@ -4227,7 +4275,7 @@ def _majeure_prealables(man, say):
         return
     r = subprocess.run(["apt-get", "update", "-q"], capture_output=True, text=True, timeout=600)
     if r.returncode != 0 or "Err:" in r.stdout:
-        raise MajError("depots Debian injoignables (Internet sur la VLAN de gestion ?) : %s"
+        raise MajError("depots Debian injoignables (Internet sur le VLAN de gestion ?) : %s"
                        % (r.stderr.strip() or r.stdout.strip())[-300:])
     r = subprocess.run(["dpkg", "--audit"], capture_output=True, text=True)
     if r.stdout.strip():
