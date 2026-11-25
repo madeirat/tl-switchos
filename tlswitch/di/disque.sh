@@ -1,7 +1,9 @@
 #!/bin/sh
 # TL-SwitchOS - choix du disque (lance par partman/early_command).
-# UN seul disque interne : il est efface et partitionne sans question.
-# Plusieurs disques : l'installateur demande lequel utiliser.
+# Le disque est TOUJOURS choisi a la main : l'installateur demande lequel utiliser
+# et comment le partitionner (guide ou manuel). Rien n'est efface sans confirmation.
+# Seule exception : "tlsauto" sur la ligne du noyau (installation sans question) ET
+# un seul disque interne : il est alors efface et partitionne automatiquement.
 . /usr/share/debconf/confmodule
 S=/cdrom/tlswitch; [ -d $S ] || S=/tmp/tlswitch
 
@@ -39,7 +41,27 @@ done
 # shellcheck disable=SC2086
 set -- $DISQUES
 logger -t tlswitch "disques trouves :$DISQUES (support : ${SRC:-aucun})"
-[ $# -eq 1 ] || exit 0   # 0 ou plusieurs : partman pose les questions normales
+if ! grep -qw tlsauto /proc/cmdline; then
+  # cas normal : partman pose les questions (disque, guide ou manuel).
+  # GRUB (BIOS) doit aller sur le disque choisi, pas sur le premier trouve :
+  # apres l'installation de base, on lit le disque qui porte /target (ou /target/boot).
+  mkdir -p /usr/lib/post-base-installer.d
+  cat > /usr/lib/post-base-installer.d/50tlswitch-grub <<'G'
+#!/bin/sh
+. /usr/share/debconf/confmodule
+P=$(sed -n 's#^\(/dev/[^ ]*\) /target/boot .*#\1#p' /proc/mounts | head -n 1)
+[ -n "$P" ] || P=$(sed -n 's#^\(/dev/[^ ]*\) /target .*#\1#p' /proc/mounts | head -n 1)
+case "$P" in /dev/mapper/*|/dev/md*|/dev/dm-*|"") exit 0 ;; esac   # LVM/RAID : choix par defaut
+D=$(echo "$P" | sed -E 's#p?[0-9]+$##')
+[ -b "$D" ] || exit 0
+db_set grub-installer/bootdev "$D"; db_fset grub-installer/bootdev seen true
+logger -t tlswitch "GRUB sur $D (disque de $P)"
+exit 0
+G
+  chmod +x /usr/lib/post-base-installer.d/50tlswitch-grub
+  exit 0
+fi
+[ $# -eq 1 ] || exit 0   # 0 ou plusieurs disques : partman pose les questions normales
 
 pre() { db_set "$1" "$2"; db_fset "$1" seen true; }
 pre partman-auto/disk "$1"

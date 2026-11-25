@@ -34,7 +34,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 
 ETC = os.environ.get("TLSWITCH_ETC", "/etc/tlswitch")
 RUN = os.environ.get("TLSWITCH_RUN", "/run/tlswitch")

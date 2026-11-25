@@ -355,7 +355,7 @@ def page_installation(version, github):
 <li>Démarre sur la clé. Le menu propose l'installation standard, l'installation par console série (115200 bauds) ou une installation Debian manuelle.</li>
 <li>L'installateur, en français, pose deux questions : le <strong>nom du switch</strong> et la <strong>VLAN de gestion</strong>.</li>
 <li>Étape réseau : DHCP automatique, ou IP fixe si tu la saisis. Le switch garde cette adresse sur son interface de gestion.</li>
-<li>Un disque unique est effacé et partitionné sans question. S'il y en a plusieurs, l'installateur demande lequel utiliser.</li>
+<li>L'installateur demande quel disque utiliser et comment le partitionner (guidé ou manuel). Rien n'est effacé sans confirmation.</li>
 <li>TL-SwitchOS s'installe, puis la machine redémarre.</li>
 </ol>
 

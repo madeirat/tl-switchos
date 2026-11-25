@@ -154,7 +154,7 @@ d-i time/zone string Europe/Paris
 # pas de synchro NTP dans l'installateur (bloque si NTP est filtre) : le switch se
 # synchronise ensuite tout seul avec systemd-timesyncd (ntp server en CLI)
 d-i clock-setup/ntp boolean false
-# disque : s'il n'y a qu'UN disque interne, il est efface sans question ; sinon l'installateur demande
+# disque : toujours choisi a la main pendant l'installation (sauf tlsauto avec un seul disque)
 d-i partman/early_command string sh /cdrom/tlswitch/di/disque.sh
 d-i partman-efi/non_efi_system boolean true
 d-i apt-setup/cdrom/set-first boolean false
@@ -387,7 +387,7 @@ ISO prete : $OUT
  2. Branche UN port du switch sur un reseau qui a acces a Internet
     (l'installation telecharge les paquets Debian).
  3. Demarre sur la cle : l'installateur pose les questions du switch (nom et
-    VLAN de gestion), puis la config reseau Debian (DHCP ou IP fixe) ; efface le disque s'il n'y en a qu'un, puis installe tout.
+    VLAN de gestion), puis la config reseau Debian (DHCP ou IP fixe), le disque a utiliser et son partitionnement, puis installe tout.
  4. Connexion : console serie $SERIAL $BAUD 8N1, SSH ou https://
     Compte admin / admin : le nouveau mot de passe est demande a la premiere connexion.
 EOF

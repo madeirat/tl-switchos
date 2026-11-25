@@ -1,5 +1,10 @@
 # Historique des versions
 
+## 1.0.4
+
+- **Installation** : le disque est toujours choisi à la main, y compris en console série. L'installateur demande quel disque utiliser et comment le partitionner (guidé ou manuel) ; rien n'est effacé sans confirmation. GRUB s'installe sur le disque choisi.
+- Le mode sans question (`tlsauto`) garde le partitionnement automatique quand il n'y a qu'un seul disque.
+
 ## 1.0.3
 
 - **SNMPv3** (SHA-256/512, AES) en plus de la communauté v2c, avec `snmp-server contact`. Un utilisateur retiré de la config ne reste pas valable dans snmpd.

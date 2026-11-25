@@ -48,7 +48,7 @@ La ligne doit se terminer par `OK`. Sous Windows : `Get-FileHash TL-SwitchOS-1.0
 3. Démarre sur la clé. Le menu TL-SwitchOS propose l'installation standard, l'installation par la console série (115200 bauds) ou une installation Debian manuelle.
 4. L'installateur, en français et en clavier AZERTY, pose deux questions : **nom du switch** et **VLAN de gestion**.
 5. Vient ensuite l'étape réseau de Debian : DHCP automatique, ou IP fixe si tu la saisis. Le switch garde cette adresse sur son interface `Vlan` de gestion.
-6. S'il n'y a qu'un seul disque, il est effacé et partitionné **sans question**. S'il y en a plusieurs, l'installateur demande lequel utiliser.
+6. L'installateur demande **quel disque** utiliser et comment le partitionner (guidé ou manuel). Rien n'est effacé sans confirmation.
 7. TL-SwitchOS s'installe d'une traite, puis la machine redémarre.
 
 L'écran de connexion affiche l'adresse du switch (mise à jour en direct si elle change) et les identifiants provisoires :
