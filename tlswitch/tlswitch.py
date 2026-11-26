@@ -34,7 +34,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 
 ETC = os.environ.get("TLSWITCH_ETC", "/etc/tlswitch")
 RUN = os.environ.get("TLSWITCH_RUN", "/run/tlswitch")
@@ -3047,6 +3047,21 @@ EOF
     return True
 
 
+def grub_auto(user, plain):
+    """Pose le verrou GRUB a la connexion d'un admin local (SSH, console, web) s'il manque :
+    seul moment ou le mot de passe en clair est connu (la config n'en garde que le hache)."""
+    try:
+        if os.geteuid() != 0 or os.path.exists(GRUB_MDP) or not plain:
+            return False
+        m, _ = load_running()
+        u = m.users.get(user or "")
+        if not u or u[0] < 15 or u[1] is None or not check_secret(plain, u[1]):
+            return False
+        return grub_verrou(plain, user)
+    except Exception:            # jamais bloquant pour une connexion
+        return False
+
+
 def grub_protege():
     try:
         return "password_pbkdf2" in open("/boot/grub/grub.cfg").read()
@@ -3465,7 +3480,8 @@ def x_version(s):
     if prev:
         s.say("Previous software : %s (install rollback pour y revenir)" % prev)
     s.say("Demarrage (GRUB) : %s" % ("protege (compte admin du switch)" if grub_protege()
-                                     else "NON protege (change le mot de passe admin pour le proteger)"))
+                                     else "verrou en cours de mise en place" if os.path.exists(GRUB_MDP)
+                                     else "NON protege (pose a la prochaine connexion d'un admin)"))
     if s.m.stp_mode == "rstp" and not shutil.which("mstpctl"):
         s.say("Spanning tree : STP classique (mstpd absent pour RSTP : apt install mstpd)")
 
@@ -5029,6 +5045,13 @@ def main(argv):
     cmd = args.pop(0)
     if cmd == "version":
         print(VERSION)
+        return 0
+    if cmd == "grub-auto":       # appele par PAM (pam_exec expose_authtok) : mot de passe sur stdin
+        try:
+            plain = sys.stdin.buffer.read(512).split(b"\0")[0].decode("utf-8", "replace").rstrip("\r\n")
+        except Exception:
+            plain = ""
+        grub_auto(os.environ.get("PAM_USER", ""), plain)
         return 0
     if cmd == "boot":
         return boot()

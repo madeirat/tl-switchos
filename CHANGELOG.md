@@ -2,11 +2,18 @@
 
 Numérotation **1.V.C** : V change avec les nouvelles fonctions, C avec les correctifs (sécurité et bugs). Une version corrective se met à jour sans rien changer à la configuration.
 
+## 1.0.6
+
+Correctif.
+
+- **Démarrage verrouillé automatiquement** : le verrou se pose tout seul à la première connexion d'un admin local après la mise à jour (SSH, console ou web), sans retaper le mot de passe. Le switch ne garde que le mot de passe haché ; c'est à la connexion qu'il le connaît en clair, juste le temps de préparer celui de GRUB.
+- **Plus de cartes réseau reconnues** : les firmwares des puces Ethernet courantes (Realtek, Broadcom, QLogic, Chelsio, Myricom, Netronome, Cavium, Intel) sont installés d'office, même pour une carte ajoutée plus tard. Le noyau Debian fournit déjà tous les pilotes. Sur une Debian installée à la main, il faut la section `non-free-firmware` dans les sources APT.
+
 ## 1.0.5
 
 Correctifs de sécurité.
 
-- **Démarrage verrouillé** : modifier une entrée de GRUB (touche `e`) ou ouvrir sa console demande le compte admin du switch et son mot de passe ; le mode de dépannage (recovery) est retiré. Le switch redémarre toujours seul. Le verrou se pose au prochain changement du mot de passe admin ; `show version` indique s'il est en place.
+- **Démarrage verrouillé** : modifier une entrée de GRUB (touche `e`) ou ouvrir sa console demande le compte admin du switch et son mot de passe ; le mode de dépannage (recovery) est retiré. Le switch redémarre toujours seul. `show version` indique s'il est en place.
 - RADIUS : une réponse sans Message-Authenticator valide est refusée (attaque « Blast-RADIUS »).
 - Historique de la CLI : les lignes contenant un secret (mot de passe, clé, communauté) ne sont plus gardées, fichier lisible par son seul propriétaire ; les anciens historiques sont nettoyés à la mise à jour.
 - Sauvegarde `copy … scp://` : adresse et nom vérifiés, plus d'option glissée dans l'URL.

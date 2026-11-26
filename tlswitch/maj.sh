@@ -81,6 +81,29 @@ if [ -f /etc/grub.d/01_tlswitch ] && [ -f /etc/grub.d/10_linux ]; then
   [ $G = 1 ] && command -v update-grub >/dev/null && update-grub >/dev/null 2>&1
 fi
 
+# verrou du demarrage pose tout seul a la prochaine connexion d'un admin local
+# (SSH ou console) : PAM transmet le mot de passe, deja verifie, a "tlswitch grub-auto"
+cat > /usr/local/sbin/tlswitch-grub-auto <<'EOS'
+#!/bin/sh
+[ -f /etc/grub.d/01_tlswitch ] && exit 0
+exec /usr/bin/python3 /usr/local/lib/tlswitch/tlswitch.py grub-auto
+EOS
+chmod 755 /usr/local/sbin/tlswitch-grub-auto
+for P in /etc/pam.d/sshd /etc/pam.d/login; do
+  [ -f "$P" ] && grep -q '^@include common-auth' "$P" || continue
+  grep -q 'tlswitch-grub' "$P" && continue
+  sed -i '/^@include common-auth/a auth optional pam_exec.so quiet expose_authtok /usr/local/sbin/tlswitch-grub-auto  # tlswitch-grub' "$P"
+done
+
+# firmwares des cartes reseau (meme liste que installer-tlswitch.sh) : installes en tache
+# de fond 90 s plus tard, apt pouvant etre occupe par la mise a jour elle-meme
+FW=$(sed -n 's/^FW="\(.*\)"$/\1/p' "${TLS_SRC:-$LIB}/installer-tlswitch.sh" $LIB/installer-tlswitch.sh 2>/dev/null | head -n 1)
+M=""; for p in $FW; do dpkg -s "$p" >/dev/null 2>&1 || M="$M $p"; done
+if [ -n "$M" ] && command -v systemd-run >/dev/null; then
+  systemctl reset-failed tlswitch-firmwares.service 2>/dev/null
+  systemd-run --quiet --unit tlswitch-firmwares --on-active=90 /bin/sh -c "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq; for p in $M; do apt-get install -y -qq --no-install-recommends \$p || logger -t tlswitch \"firmware \$p indisponible (section non-free-firmware ?)\"; done" 2>/dev/null || true
+fi
+
 # secours : si la version active ne demarre pas, retour automatique (une fois)
 # a la version precedente, puis redemarrage du switch avec elle.
 cat > /usr/local/sbin/tlswitch-secours <<'EOS'

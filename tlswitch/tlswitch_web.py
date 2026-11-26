@@ -352,6 +352,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if u and T.login_ok(m, user, pw):
                 sid = new_session(user, u[0], user in m.must_change)
                 T.log("web : connexion de %s depuis %s" % (user, ip))
+                if u[0] >= 15 and user not in m.must_change:
+                    T.grub_auto(user, pw)      # verrou du demarrage pose s'il manque
                 return self.send(200, {"ok": True}, extra={
                     "Set-Cookie": "tlsid=%s; Path=/; HttpOnly; Secure; SameSite=Strict" % sid})
             fail(ip)

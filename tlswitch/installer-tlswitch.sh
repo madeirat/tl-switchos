@@ -46,8 +46,12 @@ APT_OPTS="-o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Dpkg::Use-Pty=0"
 CORE="python3 iproute2 ethtool lldpd openssh-server openssl sudo ca-certificates"
 # utiles mais pas bloquants (mstpd absent = STP classique a la place de RSTP)
 OPT="console-setup keyboard-configuration kbd mstpd isc-dhcp-client snmpd rsyslog nftables libpam-radius-auth irqbalance lm-sensors traceroute iperf3 fail2ban systemd-timesyncd tcpdump less nano bridge-utils"
+# firmwares des cartes reseau (le noyau Debian a deja tous les pilotes Ethernet ; certaines
+# puces en ont besoin pour fonctionner) : Realtek, Broadcom, QLogic, Chelsio, Myricom,
+# Netronome, Cavium, Intel. Installes meme sans la carte : on peut en ajouter une plus tard.
+FW="firmware-realtek firmware-bnx2 firmware-bnx2x firmware-qlogic firmware-netxen firmware-myricom firmware-netronome firmware-cavium firmware-misc-nonfree firmware-intel-misc firmware-linux-free"
 manque() { local m=""; for p in "$@"; do dpkg -s "$p" >/dev/null 2>&1 || m="$m $p"; done; echo "$m"; }
-MC=$(manque $CORE); MO=$(manque $OPT)
+MC=$(manque $CORE); MO=$(manque $OPT $FW)
 if [ -z "$MC$MO" ]; then
   echo "   tous les paquets sont deja installes (installateur Debian) : rien a telecharger"
 else
