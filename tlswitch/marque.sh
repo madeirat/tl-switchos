@@ -23,7 +23,7 @@ ID=tlswitchos
 ID_LIKE=debian
 VERSION_CODENAME=${COD}
 DEBIAN_VERSION_ID="${VID}"
-HOME_URL="https://github.com/madeirat/tl-switchos"
+HOME_URL="https://github.com/tech-linux-fr/tl-switchos"
 ANSI_COLOR="1;36"
 EOS
 mv /usr/lib/os-release.tmp /usr/lib/os-release
