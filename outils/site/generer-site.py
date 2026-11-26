@@ -108,6 +108,7 @@ FONCTIONS = [
     ("supervision", "Supervision", "SNMPv3, syslog distant, export Prometheus et LLDP pour garder un œil sur le réseau."),
     ("maj", "Mises à jour signées", "Le système et Debian se mettent à jour ensemble, avec retour arrière automatique."),
     ("secours", "Sécurité des ports", "Port security, DHCP snooping, storm control, connexion RADIUS et sauvegarde automatique."),
+    ("central", "Gestion centrale", "Tous les switchs dans une seule console, TL-Manager, rattachés par un échange de clés."),
 ]
 
 ICONES = {
@@ -118,6 +119,8 @@ ICONES = {
     "supervision": '<path d="M3 12h4l3-7 4 14 3-7h4"/>',
     "maj": '<path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/><path d="M9 12l2 2 4-4"/>',
     "secours": '<path d="M4 12a8 8 0 1 0 2.4-5.7L4 8.6"/><path d="M4 4v4.6h4.6"/>',
+    "central": '<circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="19" r="2.5"/><circle cx="19" cy="19" r="2.5"/>'
+               '<path d="M12 7.5v4M12 11.5L6.5 17M12 11.5l5.5 5.5"/>',
 }
 
 
@@ -140,6 +143,7 @@ PAGES = [  # (fichier, titre du menu)
     ("commandes.html", "Commandes"),
     ("mises-a-jour.html", "Mises à jour"),
     ("notes-de-version.html", "Versions"),
+    ("tl-manager.html", "TL-Manager"),
 ]
 
 
@@ -311,6 +315,10 @@ GROUPES = [
         ("Connexion RADIUS", "Administrateurs de l'annuaire (NPS, FreeRADIUS) en SSH et sur le web, comptes locaux en secours."),
         ("Comptes et niveaux", "Niveau 15 (administration) ou 1 (lecture seule), mot de passe provisoire à changer."),
         ("Sauvegarde automatique", "Copie horodatée de la configuration en SCP vers un NAS, à chaque enregistrement ou périodiquement."),
+    ]),
+    ("Gestion centrale", [
+        ("TL-Manager", "Une console pour tous les switchs : tableau de bord, console CLI, config groupée, historique et mises à jour."),
+        ("Échange de clés", "central enable puis central accept <code> : le switch ne se laisse gérer que par son TL-Manager (mTLS, port 2507)."),
     ]),
     ("Fiabilité", [
         ("Retour arrière automatique", "Une modification qui coupe l'accès de gestion est annulée si elle n'est pas confirmée."),
@@ -559,6 +567,9 @@ def main():
     ecrire(www, "commandes.html", page_commandes(version, github, depot))
     ecrire(www, "mises-a-jour.html", page_maj(version, github))
     ecrire(www, "notes-de-version.html", page_versions(version, github, versions))
+    sys.path.insert(0, ICI)
+    import page_manager
+    ecrire(www, "tl-manager.html", page_manager.page(sys.modules[__name__], version, github, depot_url, tele, depot))
     print("site genere : %s (%d pages)" % (www, 1 + len(PAGES)))
 
 
