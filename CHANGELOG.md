@@ -1,5 +1,18 @@
 # Historique des versions
 
+Numérotation **1.V.C** : V change avec les nouvelles fonctions, C avec les correctifs (sécurité et bugs). Une version corrective se met à jour sans rien changer à la configuration.
+
+## 1.0.5
+
+Correctifs de sécurité.
+
+- **Démarrage verrouillé** : modifier une entrée de GRUB (touche `e`) ou ouvrir sa console demande le compte admin du switch et son mot de passe ; le mode de dépannage (recovery) est retiré. Le switch redémarre toujours seul. Le verrou se pose au prochain changement du mot de passe admin ; `show version` indique s'il est en place.
+- RADIUS : une réponse sans Message-Authenticator valide est refusée (attaque « Blast-RADIUS »).
+- Historique de la CLI : les lignes contenant un secret (mot de passe, clé, communauté) ne sont plus gardées, fichier lisible par son seul propriétaire ; les anciens historiques sont nettoyés à la mise à jour.
+- Sauvegarde `copy … scp://` : adresse et nom vérifiés, plus d'option glissée dans l'URL.
+- Mises à jour : un switch installé sans clé de signature la reçoit avec la mise à jour ; les paquets suivants doivent être signés.
+- Export Prometheus : conseil affiché quand il est ouvert à tous (`prometheus exporter allow <réseau>`).
+
 ## 1.0.4
 
 - **Installation** : le disque est toujours choisi à la main, y compris en console série. L'installateur demande quel disque utiliser et comment le partitionner (guidé ou manuel) ; rien n'est effacé sans confirmation. GRUB s'installe sur le disque choisi.

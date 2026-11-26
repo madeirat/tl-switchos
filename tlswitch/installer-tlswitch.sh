@@ -82,7 +82,7 @@ install -m 755 "$SRC/tlswitch.py" $LIB/tlswitch.py
 install -m 644 "$SRC/tlswitch_web.py" $LIB/tlswitch_web.py
 cp -r "$SRC/web/." $LIB/web/
 # tout le dossier est garde : il sert de base aux mises a jour et au retour arriere
-for f in depot-apt.conf depot-apt.gpg; do [ -f "$SRC/$f" ] && install -m 644 "$SRC/$f" $LIB/; done
+for f in depot-apt.conf depot-apt.gpg maj-publique.pem; do [ -f "$SRC/$f" ] && install -m 644 "$SRC/$f" $LIB/; done
 for f in maj.sh marque.sh installer-tlswitch.sh premier-demarrage.sh; do [ -f "$SRC/$f" ] && install -m 755 "$SRC/$f" $LIB/; done
 [ -d "$SRC/boot" ] && { install -d $LIB/boot; cp -r "$SRC/boot/." $LIB/boot/; }
 install -d -m 755 /var/lib/tlswitch/maj

@@ -34,7 +34,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 
 ETC = os.environ.get("TLSWITCH_ETC", "/etc/tlswitch")
 RUN = os.environ.get("TLSWITCH_RUN", "/run/tlswitch")
@@ -626,6 +626,7 @@ class Session:
         self.priv = priv          # 1 = lecture (prompt >), 15 = admin (prompt #)
         self.user = user
         self.interactive = False
+        self.grub_mdp = None
         self.out = sys.stdout
 
     def say(self, text=""):
@@ -857,6 +858,10 @@ def c_username(s, name, priv, secret):
         raise CliError("% privilege 1 (lecture) ou 15 (admin)")
     s.m.users[name] = [priv, parse_secret(secret)]
     s.m.must_change.discard(name)
+    parts = secret.strip().split(None, 1)
+    clair = parts[1] if len(parts) == 2 and parts[0] == "0" else (secret.strip() if parts and parts[0] not in ("5", "8", "9") else None)
+    if priv >= 15 and clair:
+        s.grub_mdp = (clair, name)           # pose par execute() une fois la config appliquee
 
 
 @CONF.add("username <nom> password-change-required", "Mot de passe provisoire : a changer a la connexion")
@@ -1256,7 +1261,7 @@ def c_no_mon(s, n):
 
 def parse_scp_url(url):
     """scp://compte@hote[:port]/dossier -> (compte, hote, port, dossier)"""
-    mo = re.fullmatch(r"scp://([A-Za-z0-9._-]{1,32})@(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9.-]{1,253})(?::(\d{1,5}))?(/[A-Za-z0-9._/~-]*)?", url)
+    mo = re.fullmatch(r"scp://([A-Za-z0-9_][A-Za-z0-9._-]{0,31})@(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9][A-Za-z0-9.-]{0,252})(?::(\d{1,5}))?(/[A-Za-z0-9._/~-]*)?", url)
     if not mo:
         raise CliError("% Adresse : scp://compte@serveur[:port]/dossier")
     port = int(mo.group(3) or 22)
@@ -1322,6 +1327,8 @@ def c_no_arch(s):
 @CONF.add("prometheus exporter", "Export des compteurs pour Prometheus / Zabbix (port 9101)")
 def c_prom(s):
     s.m.prom = True
+    if not s.m.prom_allow and getattr(s, "interactive", False):
+        s.say("% Conseil : limite l'acces avec 'prometheus exporter allow <reseau>' (sinon ouvert a tous)")
 
 
 @CONF.add("prometheus exporter port <port>", "Port d'ecoute de l'export")
@@ -2543,8 +2550,27 @@ def radius_auth(m, user, password):
                 code = data[0]
                 rlen = int.from_bytes(data[2:4], "big")
                 expect = hashlib.md5(data[:4] + ra + data[20:rlen] + secret).digest()
-                if not hmac.compare_digest(expect, data[4:20]):
+                if rlen < 20 or rlen > len(data) or not hmac.compare_digest(expect, data[4:20]):
                     log("radius : reponse de %s avec une mauvaise signature (cle ?)" % ip)
+                    break
+                # Message-Authenticator exige dans la reponse (parade a l'attaque Blast-RADIUS)
+                body, i, ma_pos = bytearray(data[20:rlen]), 0, None
+                while i + 2 <= len(body):
+                    t, ln = body[i], body[i + 1]
+                    if ln < 2 or i + ln > len(body):
+                        break
+                    if t == 80 and ln == 18:
+                        ma_pos = i + 2
+                    i += ln
+                if ma_pos is None:
+                    log("radius : reponse de %s sans Message-Authenticator : refusee "
+                        "(mets a jour le serveur RADIUS / NPS)" % ip)
+                    break
+                recu = bytes(body[ma_pos:ma_pos + 16])
+                body[ma_pos:ma_pos + 16] = b"\0" * 16
+                calc = hmac.new(secret, data[:4] + ra + bytes(body), hashlib.md5).digest()
+                if not hmac.compare_digest(calc, recu):
+                    log("radius : Message-Authenticator invalide dans la reponse de %s" % ip)
                     break
                 if code == 2:
                     return True
@@ -2637,7 +2663,7 @@ def archive_now(m, motif="manuelle"):
                                  (path.rstrip("/") or "") + "/" + name if path != "." else name)
             r = subprocess.run(["scp", "-q", "-i", ARCH_KEY, "-P", str(port), "-o", "BatchMode=yes",
                                 "-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=" + ARCH_KNOWN,
-                                "-o", "ConnectTimeout=10", os.path.join(ARCH_DIR, name), dest],
+                                "-o", "ConnectTimeout=10", "--", os.path.join(ARCH_DIR, name), dest],
                                capture_output=True, text=True, timeout=120)
             if r.returncode == 0:
                 msg = "%s copie sur %s" % (name, host)
@@ -2965,6 +2991,69 @@ def password_problem(user, new, model):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Verrou du demarrage (GRUB) : modifier une entree (e) ou ouvrir la console (c)
+# demande le compte admin ; le demarrage normal reste libre (redemarrage seul).
+# ---------------------------------------------------------------------------
+GRUB_MDP = "/etc/grub.d/01_tlswitch"
+GRUB_LINUX = "/etc/grub.d/10_linux"
+
+
+def grub_durcir():
+    """Entrees Debian demarrables sans mot de passe, mode secours retire. True si en place."""
+    try:
+        t = open(GRUB_LINUX).read()
+        if "--unrestricted" not in t:
+            t2 = re.sub(r'(?m)^(CLASS="--class gnu-linux[^"]*)"', r'\1 --unrestricted"', t, count=1)
+            if t2 == t:
+                return False
+            write_atomic(GRUB_LINUX, t2, 0o755)
+        d = "/etc/default/grub"
+        g = open(d).read()
+        if not re.search(r'(?m)^GRUB_DISABLE_RECOVERY="?true"?', g):
+            g = re.sub(r'(?m)^GRUB_DISABLE_RECOVERY=.*\n?', "", g).rstrip("\n") + '\nGRUB_DISABLE_RECOVERY="true"\n'
+            write_atomic(d, g, 0o644)
+        return "--unrestricted" in open(GRUB_LINUX).read()
+    except OSError:
+        return False
+
+
+def grub_verrou(plain, user="admin"):
+    """Compte GRUB = compte admin du switch (mot de passe hache PBKDF2, comme grub-mkpasswd-pbkdf2)."""
+    import hashlib
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,32}", user or ""):
+        return False
+    if os.geteuid() != 0 or not os.path.isdir("/etc/grub.d") or not shutil.which("update-grub"):
+        return False
+    if not grub_durcir():
+        log("verrou GRUB non pose : /etc/grub.d/10_linux inattendu")
+        return False
+    sel = os.urandom(64)
+    h = hashlib.pbkdf2_hmac("sha512", plain.encode(), sel, 100000, 64)
+    pb = "grub.pbkdf2.sha512.100000.%s.%s" % (sel.hex().upper(), h.hex().upper())
+    write_atomic(GRUB_MDP, """#!/bin/sh
+# TL-SwitchOS : modifier le demarrage (touche e) ou la console GRUB (c) demande le
+# compte admin du switch et son mot de passe. Securite : sans '--unrestricted' sur les entrees
+# Debian, rien n'est verrouille (le switch doit toujours redemarrer seul).
+grep -q -- '--unrestricted' /etc/grub.d/10_linux || exit 0
+cat <<'EOF'
+set superusers="%s"
+password_pbkdf2 %s %s
+EOF
+""" % (user, user, pb), 0o700)
+    subprocess.Popen(["update-grub"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+    log("verrou GRUB mis a jour (compte %s)" % user)
+    return True
+
+
+def grub_protege():
+    try:
+        return "password_pbkdf2" in open("/boot/grub/grub.cfg").read()
+    except OSError:
+        return False
+
+
 def change_password(user, new):
     """Change le mot de passe, leve l'obligation, applique et ENREGISTRE (survit au redemarrage)."""
     with Lock():
@@ -2983,6 +3072,8 @@ def change_password(user, new):
         m.enable_secret = h          # l'enable secret provisoire suit le nouveau mot de passe
     m.must_change.discard(user)
     commit(m)
+    if m.users[user][0] >= 15:
+        grub_verrou(new, user)
     if os.path.exists(STARTUP):
         shutil.copy2(STARTUP, STARTUP + ".bak")
     write_atomic(STARTUP, m.render())
@@ -3001,6 +3092,7 @@ def execute(s, line, remote=True, auto_revert=300):
         fresh, _ = load_running()          # recharge : d'autres sessions ont pu modifier
     s.m = fresh
     s.armed = False
+    s.grub_mdp = None
     before = s.m.render()
     fp_before = mgmt_fingerprint(s.m)
     s.run_line(line)
@@ -3015,6 +3107,9 @@ def execute(s, line, remote=True, auto_revert=300):
         armed = True
     for w in commit(s.m):
         s.say("%% Attention : %s" % w)
+    if s.grub_mdp:
+        grub_verrou(*s.grub_mdp)
+    s.grub_mdp = None
     s.armed = armed
     if armed:
         s.say("%% Modification de l'acces de gestion : retour arriere automatique dans %d s."
@@ -3369,6 +3464,8 @@ def x_version(s):
     prev = lib_version(PREV)
     if prev:
         s.say("Previous software : %s (install rollback pour y revenir)" % prev)
+    s.say("Demarrage (GRUB) : %s" % ("protege (compte admin du switch)" if grub_protege()
+                                     else "NON protege (change le mot de passe admin pour le proteger)"))
     if s.m.stp_mode == "rstp" and not shutil.which("mstpctl"):
         s.say("Spanning tree : STP classique (mstpd absent pour RSTP : apt install mstpd)")
 
@@ -3594,6 +3691,8 @@ def x_metrics(s):
     s.say("Export Prometheus : %s" % ("http://<ip-du-switch>:%d/metrics" % m.prom_port if m.prom else "inactif"))
     if m.prom_allow:
         s.say("Autorise depuis : %s" % ", ".join(m.prom_allow))
+    elif m.prom:
+        s.say("Autorise depuis : tout le monde (conseil : prometheus exporter allow <reseau>)")
 
 
 @EXEC.add("enable", "Passer au niveau 15")
@@ -3801,6 +3900,14 @@ BANNER = r"""
 """
 
 
+SENSIBLE = re.compile(r"(?i)\b(secret|password|passwd|key|community|test\s+aaa|snmp-server\s+user)\b")
+
+
+def ligne_sensible(line):
+    """Commande qui contient un secret (a ne pas garder dans l'historique)."""
+    return bool(SENSIBLE.search(line))
+
+
 def who_am_i(model):
     """Utilisateur reel (via sudo) et son niveau de privilege."""
     user = os.environ.get("SUDO_USER") or os.environ.get("USER") or "root"
@@ -3921,6 +4028,14 @@ def cli(argv=None):
         line = line.strip()
         if not line:
             continue
+        if readline and ligne_sensible(line):
+            # mot de passe, cle, communaute : jamais garde dans l'historique (fichier ou show history)
+            try:
+                n = readline.get_current_history_length()
+                if n and readline.get_history_item(n) == line:
+                    readline.remove_history_item(n - 1)
+            except (ValueError, AttributeError):
+                pass
         if line.endswith("?"):
             show_help(s, line[:-1])
             continue
@@ -3942,7 +4057,12 @@ def cli(argv=None):
             s.say("%% Valeur invalide : %s" % e)
     if readline and hist:
         try:
-            readline.write_history_file(hist)
+            old = os.umask(0o077)
+            try:
+                readline.write_history_file(hist)
+            finally:
+                os.umask(old)
+            os.chmod(hist, 0o600)
         except OSError:
             pass
     if interactive and unsaved():

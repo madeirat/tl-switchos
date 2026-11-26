@@ -50,6 +50,37 @@ if [ -f $E/web.crt ] && ! openssl x509 -in $E/web.crt -noout -ext subjectAltName
   fi
 fi
 
+# signature des mises a jour : un switch installe sans la cle l'obtient ici ;
+# les paquets suivants devront alors etre signes
+for P in "${TLS_SRC:-/nonexistent}/maj-publique.pem" $LIB/maj-publique.pem; do
+  if [ ! -f $E/maj.pub ] && [ -f "$P" ] && openssl pkey -pubin -in "$P" -noout 2>/dev/null; then
+    install -d -m 700 $E; install -m 644 "$P" $E/maj.pub
+    logger -t tlswitch "cle de signature des mises a jour installee"
+  fi
+done
+[ -f "${TLS_SRC:-/nonexistent}/maj-publique.pem" ] && install -m 644 "$TLS_SRC/maj-publique.pem" $LIB/ 2>/dev/null
+
+# historiques de la CLI : prives, sans les lignes portant un secret
+for F in /root/.tlsh_history /home/*/.tlsh_history; do
+  [ -f "$F" ] || continue
+  chmod 600 "$F"
+  sed -i -E '/(^|[^A-Za-z0-9_])([Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww]([Oo][Rr])?[Dd]|[Kk][Ee][Yy]|[Cc][Oo][Mm][Mm][Uu][Nn][Ii][Tt][Yy])([^A-Za-z0-9_]|$)|[Tt][Ee][Ss][Tt] +[Aa][Aa][Aa]|[Ss][Nn][Mm][Pp]-[Ss][Ee][Rr][Vv][Ee][Rr] +[Uu][Ss][Ee][Rr]/d' "$F"
+done
+
+# demarrage verrouille (pose par le mot de passe du compte admin) : apres une mise a
+# jour de GRUB, les entrees Debian restent demarrables seules et le mode secours absent
+if [ -f /etc/grub.d/01_tlswitch ] && [ -f /etc/grub.d/10_linux ]; then
+  G=0
+  if ! grep -q -- '--unrestricted' /etc/grub.d/10_linux; then
+    sed -i -E 's/^(CLASS="--class gnu-linux[^"]*)"/\1 --unrestricted"/' /etc/grub.d/10_linux && G=1
+  fi
+  if ! grep -qE '^GRUB_DISABLE_RECOVERY="?true"?' /etc/default/grub 2>/dev/null; then
+    sed -i '/^GRUB_DISABLE_RECOVERY=/d' /etc/default/grub; echo 'GRUB_DISABLE_RECOVERY="true"' >> /etc/default/grub; G=1
+  fi
+  grep -q password_pbkdf2 /boot/grub/grub.cfg 2>/dev/null || G=1
+  [ $G = 1 ] && command -v update-grub >/dev/null && update-grub >/dev/null 2>&1
+fi
+
 # secours : si la version active ne demarre pas, retour automatique (une fois)
 # a la version precedente, puis redemarrage du switch avec elle.
 cat > /usr/local/sbin/tlswitch-secours <<'EOS'
