@@ -137,22 +137,40 @@ GITHUB_ICO = ('<svg class="gh" viewBox="0 0 16 16" aria-hidden="true"><path fill
               '.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>')
 
 
-PAGES = [  # (fichier, titre du menu)
-    ("fonctions.html", "Fonctions"),
-    ("installation.html", "Installation"),
-    ("commandes.html", "Commandes"),
-    ("mises-a-jour.html", "Mises à jour"),
-    ("notes-de-version.html", "Versions"),
-    ("tl-manager.html", "TL-Manager"),
+RUBRIQUES = [  # (titre du menu, [(fichier, titre du sous-menu)])
+    ("TL-SwitchOS", [
+        ("index.html", "Présentation"),
+        ("fonctions.html", "Fonctions"),
+        ("installation.html", "Installation"),
+        ("commandes.html", "Commandes"),
+        ("mises-a-jour.html", "Mises à jour"),
+        ("notes-de-version.html", "Versions"),
+    ]),
+    ("TL-Manager", [
+        ("tl-manager.html", "Présentation"),
+        ("tl-manager-installation.html", "Installation"),
+        ("tl-manager-documentation.html", "Documentation"),
+    ]),
 ]
+PAGES = [p for _, ps in RUBRIQUES for p in ps]
+
+
+def lien(f):
+    return "./" if f == "index.html" else f
 
 
 def gabarit(titre, description, corps, version, github, actuelle=""):
     """Squelette commun : en-tete avec menu, contenu, pied de page."""
     e = html.escape
     gh = "https://github.com/%s" % github if github else ""
-    nav = "".join('<a href="%s"%s>%s</a>' % (f, ' aria-current="page"' if f == actuelle else "", e(l))
-                  for f, l in PAGES)
+    actuelle = actuelle or "index.html"
+    nav, sous = "", ""
+    for titre_r, ps in RUBRIQUES:
+        dedans = any(f == actuelle for f, _ in ps)
+        nav += '<a href="%s"%s>%s</a>' % (lien(ps[0][0]), ' aria-current="page"' if dedans else "", e(titre_r))
+        if dedans:
+            sous = "".join('<a href="%s"%s>%s</a>' % (lien(f), ' aria-current="page"' if f == actuelle else "", e(l))
+                           for f, l in ps)
     if gh:
         nav += '<a class="nav-gh" href="%s">%sGitHub</a>' % (e(gh), GITHUB_ICO)
     pied_gh = ('<a href="%s">%sCode source</a>' % (e(gh), GITHUB_ICO)) if gh else ""
@@ -172,8 +190,9 @@ def gabarit(titre, description, corps, version, github, actuelle=""):
 <header class="barre">
   <div class="largeur barre-in">
     <a class="marque" href="./"><img src="img/logo.svg" alt="" width="26" height="30">TL-SwitchOS</a>
-    <nav aria-label="Pages">{nav}</nav>
+    <nav aria-label="Rubriques">{nav}</nav>
   </div>
+  <div class="sous-barre"><div class="largeur"><nav class="sous-menu" aria-label="Pages de la rubrique">{sous}</nav></div></div>
 </header>
 
 <main id="haut">
@@ -181,12 +200,12 @@ def gabarit(titre, description, corps, version, github, actuelle=""):
 </main>
 
 <footer class="pied">
-  <div class="largeur pied-in"><span>TL-SwitchOS {version} · TECH-LINUX</span>
+  <div class="largeur pied-in"><span>TL-SwitchOS {version}</span>
   <span class="pied-liens"><a href="notes-de-version.html">Notes de version</a>{pied_gh}</span></div>
 </footer>
 </body>
 </html>
-""".format(titre=e(titre), desc=e(description), nav=nav, corps=corps, version=e(version), pied_gh=pied_gh)
+""".format(titre=e(titre), desc=e(description), nav=nav, sous=sous, corps=corps, version=e(version), pied_gh=pied_gh)
 
 
 def entete_doc(titre, chapo):
@@ -569,8 +588,9 @@ def main():
     ecrire(www, "notes-de-version.html", page_versions(version, github, versions))
     sys.path.insert(0, ICI)
     import page_manager
-    ecrire(www, "tl-manager.html", page_manager.page(sys.modules[__name__], version, github, depot_url, tele, depot))
-    print("site genere : %s (%d pages)" % (www, 1 + len(PAGES)))
+    for nom, contenu in page_manager.pages(sys.modules[__name__], version, github, depot_url, tele, depot):
+        ecrire(www, nom, contenu)
+    print("site genere : %s (%d pages)" % (www, len(PAGES)))
 
 
 if __name__ == "__main__":

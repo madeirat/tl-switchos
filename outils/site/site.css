@@ -148,3 +148,10 @@ nav a[aria-current="page"]{color:var(--text);background:rgba(59,130,246,.14)}
   .tableau td,.tableau th{padding:8px 6px}
   .filtre{top:96px}
 }
+/* rubriques : sous-menu sous la barre */
+.sous-barre{border-top:1px solid rgba(255,255,255,.05)}
+.sous-menu{display:flex;gap:2px;overflow-x:auto;height:42px;align-items:center;scrollbar-width:none}
+.sous-menu a{color:var(--muted);padding:5px 11px;border-radius:7px;font-size:.86rem;white-space:nowrap}
+.sous-menu a:hover{color:var(--text);background:rgba(255,255,255,.05);text-decoration:none}
+.sous-menu a[aria-current="page"]{color:var(--text);background:rgba(59,130,246,.14)}
+@media (max-width:760px){.sous-menu a{display:inline-flex!important}}
