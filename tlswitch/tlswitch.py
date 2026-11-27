@@ -19,10 +19,10 @@ Un seul fichier, uniquement la bibliotheque standard de Python 3.
   tlswitch archive                        sauvegarde de la config maintenant (archive path)
   tlswitch metrics                        serveur d'export Prometheus (service tlswitch-metrics)
 
-Projet TECH-LINUX.
 """
 
 import fcntl
+import glob
 import ipaddress
 import json
 import os
@@ -30,11 +30,12 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
 
-VERSION = "1.0.6"
+VERSION = "1.1.0"
 
 ETC = os.environ.get("TLSWITCH_ETC", "/etc/tlswitch")
 RUN = os.environ.get("TLSWITCH_RUN", "/run/tlswitch")
@@ -274,6 +275,7 @@ class Model:
         self.svis = {}
         self.gateway = None
         self.dns = []
+        self.domain = ""                           # suffixe DNS (ip domain-name)
         self.ntp = []
         self.stp_mode = "rstp"
         self.stp_priority = 32768
@@ -284,6 +286,7 @@ class Model:
         self.must_change = set()   # comptes dont le mot de passe est provisoire
         self.enable_secret = None
         self.http = True
+        self.sso = {}                              # SSO de l'interface web (OpenID Connect)
         self.ssh = True
         self.banner = ""
         self.snmp_contact = ""
@@ -479,10 +482,16 @@ class Model:
             L.append("!")
         if self.gateway:
             L.append("ip default-gateway %s" % self.gateway)
+        if self.domain:
+            L.append("ip domain-name %s" % self.domain)
         for d in self.dns:
             L.append("ip name-server %s" % d)
         L.append("!")
         L.append("ip http secure-server" if self.http else "no ip http secure-server")
+        for k, mot in (("issuer", "issuer"), ("client_id", "client-id"), ("secret", "client-secret"),
+                       ("admin_group", "admin-group"), ("read_group", "read-group"), ("label", "label")):
+            if self.sso.get(k):
+                L.append("ip http sso %s %s" % (mot, self.sso[k]))
         L.append("ip ssh server" if self.ssh else "no ip ssh server")
         L.append("!")
         L.append("end")
@@ -632,6 +641,15 @@ class Session:
     def say(self, text=""):
         self.out.write(text + "\n")
 
+    def _conf_connue(self, words):
+        for g in (MODES[self.mode], CONF):
+            try:
+                g.match(words)
+                return True
+            except CliError:
+                pass
+        return False
+
     def prompt(self):
         if self.mode == "exec":
             return self.m.hostname + ("#" if self.priv >= 15 else ">")
@@ -649,6 +667,9 @@ class Session:
             self.mode, self.ctx = "config", None     # ligne non indentee = niveau global
         if self.mode != "exec" and words[0].lower() == "do" and len(words) > 1:
             cmd, args = EXEC.match(words[1:])
+        elif self.mode != "exec" and words[0].lower() in ("clear", "show", "sh", "ping", "traceroute") \
+                and not self._conf_connue(words):
+            cmd, args = EXEC.match(words)
         elif self.mode.startswith("config-"):
             # dans un sous-mode, une commande globale fait remonter (comme IOS)
             try:
@@ -765,6 +786,20 @@ def c_dns(s, rest):
 @CONF.add("no ip name-server", "Retirer les DNS")
 def c_no_dns(s):
     s.m.dns = []
+
+
+@CONF.add("ip domain-name <suffixe>", "Suffixe DNS (nom complet du switch : nom.suffixe)")
+def c_domain(s, d):
+    d = d.strip(".").lower()
+    if not re.fullmatch(r"(?=.{1,200}$)[a-z0-9]([a-z0-9-]{0,62})(\.[a-z0-9]([a-z0-9-]{0,62}))*", d):
+        raise CliError("% Suffixe DNS invalide : " + d)
+    s.m.domain = d
+
+
+@CONF.add("no ip domain-name", "Retirer le suffixe DNS (repris du DHCP)")
+def c_no_domain(s):
+    s.m.domain = ""
+
 
 
 @CONF.add("ntp server <ip>", "Serveur NTP")
@@ -924,6 +959,57 @@ def c_http(s):
 @CONF.add("no ip http secure-server", "Couper l'interface web")
 def c_no_http(s):
     s.m.http = False
+
+
+def _sso_mot(v, motif, quoi):
+    if not re.fullmatch(motif, v or ""):
+        raise CliError("%% %s invalide" % quoi)
+    return v
+
+
+@CONF.add("ip http sso issuer <url>", "SSO : adresse de l'emetteur OpenID Connect (Authentik, Keycloak...)")
+def c_sso_issuer(s, url):
+    s.m.sso["issuer"] = _sso_mot(url.rstrip("/") + ("/" if url.endswith("/") else ""),
+                                 r"https://[A-Za-z0-9.\-]+(:\d+)?(/[A-Za-z0-9._~%!$&'()*+,;=:@/\-]*)?", "Adresse (https://...)")
+
+
+@CONF.add("ip http sso client-id <id>", "SSO : identifiant du client (Client ID)")
+def c_sso_id(s, v):
+    s.m.sso["client_id"] = _sso_mot(v, r"[A-Za-z0-9._~:@\-]{1,200}", "Client ID")
+
+
+@CONF.add("ip http sso client-secret <secret>", "SSO : secret du client (Client Secret)")
+def c_sso_secret(s, v):
+    s.m.sso["secret"] = _sso_mot(v, r"[\x21-\x7e]{1,300}", "Client Secret")
+
+
+@CONF.add("ip http sso admin-group <groupe>", "SSO : groupe qui a le niveau 15 (administration)")
+def c_sso_admin(s, v):
+    s.m.sso["admin_group"] = _sso_mot(v, r"[^\s]{1,100}", "Groupe")
+
+
+@CONF.add("ip http sso read-group <groupe>", "SSO : groupe en lecture seule (niveau 1)")
+def c_sso_read(s, v):
+    s.m.sso["read_group"] = _sso_mot(v, r"[^\s]{1,100}", "Groupe")
+
+
+@CONF.add("ip http sso label <texte>", "SSO : texte du bouton de connexion (un mot, ex : Authentik)")
+def c_sso_label(s, v):
+    s.m.sso["label"] = _sso_mot(v, r"[A-Za-z0-9._\-]{1,30}", "Texte")
+
+
+@CONF.add("no ip http sso", "Retirer le SSO de l'interface web")
+def c_no_sso(s):
+    s.m.sso = {}
+
+
+@CONF.add("no ip http sso <cle>", "Retirer un reglage SSO (read-group, label...)")
+def c_no_sso_cle(s, k):
+    cle = {"issuer": "issuer", "client-id": "client_id", "client-secret": "secret", "admin-group": "admin_group",
+           "read-group": "read_group", "label": "label"}.get(k)
+    if not cle:
+        raise CliError("% Reglage SSO inconnu : " + k)
+    s.m.sso.pop(cle, None)
 
 
 @CONF.add("ip http server", "Interface web (toujours en HTTPS)")
@@ -1976,7 +2062,8 @@ class Applier:
                 if os.path.islink("/etc/resolv.conf"):
                     os.unlink("/etc/resolv.conf")
                 with open("/etc/resolv.conf", "w") as f:
-                    f.write("# genere par TL-SwitchOS\n" + "".join("nameserver %s\n" % d for d in m.dns))
+                    f.write("# genere par TL-SwitchOS\n" + ("search %s\n" % m.domain if m.domain else "")
+                            + "".join("nameserver %s\n" % d for d in m.dns))
             except OSError as e:
                 self.warn.append("resolv.conf : %s" % e)
 
@@ -1999,6 +2086,11 @@ class Applier:
                 archive_key()
             except (OSError, subprocess.SubprocessError) as e:
                 self.warn.append("cle de sauvegarde : %s" % e)
+        if not self.dry:
+            try:
+                cert_web(m)
+            except Exception as e:                 # jamais bloquant pour la configuration
+                self.warn.append("certificat HTTPS : %s" % e)
         self.service("tlswitch-web", m.http)
         self.service("ssh", m.ssh)
         if not self.dry:
@@ -2193,9 +2285,10 @@ class Applier:
             if on:
                 self.run("ecrire %s ; %s : %s" % (conf, pam, line))
             return
-        mod = [p for p in ("/lib/x86_64-linux-gnu/security/pam_radius_auth.so",
-                           "/usr/lib/x86_64-linux-gnu/security/pam_radius_auth.so",
-                           "/lib/security/pam_radius_auth.so") if os.path.exists(p)]
+        import glob
+        mod = [p for p in glob.glob("/usr/lib/*-linux-gnu/security/pam_radius_auth.so")
+               + glob.glob("/lib/*-linux-gnu/security/pam_radius_auth.so")
+               + ["/lib/security/pam_radius_auth.so"] if os.path.exists(p)]
         if on and not mod:
             self.warn.append("libpam-radius-auth absent (apt install libpam-radius-auth) : "
                              "RADIUS seulement pour le web")
@@ -2355,6 +2448,87 @@ def write_atomic(path, text, mode=0o600):
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
+
+
+# --- certificat HTTPS : nom du switch, nom complet (suffixe DNS) et adresses IP ------
+WEB_CRT = os.path.join(ETC, "web.crt")
+WEB_KEY = os.path.join(ETC, "web.key")
+
+
+def suffixe_dns(m=None):
+    """Suffixe DNS : 'ip domain-name', sinon celui donne par le DHCP (resolv.conf, baux)."""
+    if m is not None and m.domain:
+        return m.domain
+    try:
+        for l in open("/etc/resolv.conf"):
+            w = l.split()
+            if len(w) >= 2 and w[0] in ("search", "domain") and w[1] not in (".", "local"):
+                if _suffixe_ok(w[1]):
+                    return _suffixe_ok(w[1])
+    except OSError:
+        pass
+    d = ""
+    for f in glob.glob("/var/lib/dhcp/dhclient*.leases"):
+        try:
+            for x in re.findall(r'option domain-name "([^"]+)"', open(f).read()):
+                d = x.split()[0]
+        except OSError:
+            pass
+    return _suffixe_ok(d)
+
+
+SUFFIXE_RE = re.compile(r"(?=.{1,200}$)[a-z0-9]([a-z0-9-]{0,62})(\.[a-z0-9]([a-z0-9-]{0,62}))*")
+
+
+def _suffixe_ok(d):
+    """Suffixe venu du reseau (DHCP) : garde seulement un nom DNS valide."""
+    d = (d or "").strip(".").lower()
+    return d if SUFFIXE_RE.fullmatch(d) else ""
+
+
+def cert_web(m=None, force=False):
+    """Refait le certificat auto-signe de l'interface web si le nom, le suffixe DNS ou les
+    adresses de gestion ont change. Un certificat importe (pas fait par TL-SwitchOS) n'est
+    jamais touche. Renvoie True si le certificat a ete refait."""
+    if os.geteuid() != 0 or not os.path.exists(WEB_KEY) or not shutil.which("openssl"):
+        return False
+    if m is None:
+        try:
+            m, _ = load_config(STARTUP)
+        except Exception:
+            m = None
+    host = (m.hostname if m is not None else "") or socket.gethostname().split(".")[0]
+    dom = suffixe_dns(m)
+    noms = [host, host + ".local"] + ([host + "." + dom] if dom and dom != "local" else [])
+    ips = []
+    for l in sh("ip -4 -o addr show 2>/dev/null").splitlines():
+        w = l.split()
+        if len(w) >= 4 and re.match(r"(vlan\d+|mgmt0)$", w[1].split("@")[0]):
+            ips.append(w[3].split("/")[0])
+    voulu = {"DNS:" + n for n in noms} | {"IP Address:" + i for i in ips}
+    if os.path.exists(WEB_CRT):
+        r = subprocess.run(["openssl", "x509", "-in", WEB_CRT, "-noout", "-subject", "-ext", "subjectAltName"],
+                           capture_output=True, text=True)
+        if "TECH-LINUX" not in r.stdout and "TL-SwitchOS" not in r.stdout:
+            return False                           # certificat importe : on n'y touche pas
+        actuel = {x.strip() for x in r.stdout.split("Alternative Name:")[-1].replace("\n", ",").split(",")
+                  if x.strip().startswith(("DNS:", "IP Address:"))}
+        if actuel == voulu and not force:
+            return False
+    san = ",".join(["DNS:" + n for n in noms] + ["IP:" + i for i in ips])
+    nouveau = WEB_CRT + ".nouveau"
+    r = subprocess.run(["openssl", "req", "-x509", "-key", WEB_KEY, "-days", "825",
+                        "-subj", "/CN=%s/O=TL-SwitchOS" % (noms[2] if len(noms) > 2 else host),
+                        "-addext", "subjectAltName=" + san, "-addext", "basicConstraints=critical,CA:FALSE",
+                        "-addext", "keyUsage=critical,digitalSignature,keyEncipherment",
+                        "-addext", "extendedKeyUsage=serverAuth", "-out", nouveau],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise OSError(r.stderr.strip()[:200] or "openssl a echoue")
+    os.replace(nouveau, WEB_CRT)
+    log("certificat HTTPS refait : %s" % san)
+    subprocess.run(["systemctl", "try-restart", "tlswitch-web.service"], capture_output=True)
+    return True
 
 
 def log(msg):
@@ -3018,11 +3192,51 @@ def grub_durcir():
         return False
 
 
+# Image compacte (petites machines) : systeme squashfs A/B, GRUB sur la partition TLSBOOT
+IMAGE_INFO = "/etc/tlswitch-image"
+IMAGE_BOOT = "/media/boot"
+IMAGE_DATA = "/media/data"
+IMAGE_GRUB_MDP = os.path.join(IMAGE_BOOT, "boot/grub/mdp.cfg")
+
+
+def image_compacte():
+    """Infos de l'image compacte ({} si installation Debian classique)."""
+    try:
+        return dict(l.strip().split("=", 1) for l in open(IMAGE_INFO) if "=" in l)
+    except OSError:
+        return {}
+
+
+def image_live():
+    """Live CD / cle de l'ISO : configuration en memoire, rien sur les disques."""
+    try:
+        return "tlslive" in open("/proc/cmdline").read().split()
+    except OSError:
+        return False
+
+
+def _image_boot():
+    if not os.path.ismount(IMAGE_BOOT):
+        subprocess.run(["/usr/local/sbin/tlswitch-image", "monter-boot"], capture_output=True)
+    return os.path.ismount(IMAGE_BOOT)
+
+
 def grub_verrou(plain, user="admin"):
     """Compte GRUB = compte admin du switch (mot de passe hache PBKDF2, comme grub-mkpasswd-pbkdf2)."""
     import hashlib
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,32}", user or ""):
         return False
+    if image_compacte():
+        # grub.cfg de l'image : l'entree TL-SwitchOS est --unrestricted, mdp.cfg pose le compte
+        if os.geteuid() != 0 or image_live() or not _image_boot():
+            return False
+        sel = os.urandom(64)
+        h = hashlib.pbkdf2_hmac("sha512", plain.encode(), sel, 100000, 64)
+        write_atomic(IMAGE_GRUB_MDP, 'set superusers="%s"\npassword_pbkdf2 %s grub.pbkdf2.sha512.100000.%s.%s\n'
+                     % (user, user, sel.hex().upper(), h.hex().upper()), 0o600)
+        subprocess.run(["sync"])
+        log("verrou GRUB mis a jour (compte %s)" % user)
+        return True
     if os.geteuid() != 0 or not os.path.isdir("/etc/grub.d") or not shutil.which("update-grub"):
         return False
     if not grub_durcir():
@@ -3051,7 +3265,8 @@ def grub_auto(user, plain):
     """Pose le verrou GRUB a la connexion d'un admin local (SSH, console, web) s'il manque :
     seul moment ou le mot de passe en clair est connu (la config n'en garde que le hache)."""
     try:
-        if os.geteuid() != 0 or os.path.exists(GRUB_MDP) or not plain:
+        if os.geteuid() != 0 or image_live() \
+                or os.path.exists(IMAGE_GRUB_MDP if image_compacte() else GRUB_MDP) or not plain:
             return False
         m, _ = load_running()
         u = m.users.get(user or "")
@@ -3063,6 +3278,9 @@ def grub_auto(user, plain):
 
 
 def grub_protege():
+    if image_compacte():
+        _image_boot()
+        return os.path.exists(IMAGE_GRUB_MDP)
     try:
         return "password_pbkdf2" in open("/boot/grub/grub.cfg").read()
     except OSError:
@@ -3137,8 +3355,42 @@ def execute(s, line, remote=True, auto_revert=300):
 # Commandes show et exec
 # ---------------------------------------------------------------------------
 
-def link_table():
-    return {l["ifname"]: l for l in sh_json("ip -j -s -d link show")}
+COMPTEURS_ZERO = os.path.join(RUN, "compteurs-zero.json")
+
+
+def link_table(brut=False):
+    t = {l["ifname"]: l for l in sh_json("ip -j -s -d link show")}
+    if brut:
+        return t
+    # clear counters : les compteurs repartent de la valeur notee (le noyau ne les remet pas a 0)
+    try:
+        zero = json.load(open(COMPTEURS_ZERO))
+    except (OSError, ValueError):
+        return t
+    for n, base in zero.items():
+        st = t.get(n, {}).get("stats64")
+        if not st:
+            continue
+        for sens in ("rx", "tx"):
+            for k, v in (base.get(sens) or {}).items():
+                cur = st.get(sens, {}).get(k)
+                if isinstance(cur, int) and isinstance(v, int) and cur >= v:
+                    st[sens][k] = cur - v
+    return t
+
+
+def compteurs_zero(noms=None):
+    """Note les compteurs actuels : ils s'affichent ensuite a partir de 0 (jusqu'au redemarrage)."""
+    t = link_table(brut=True)
+    try:
+        zero = json.load(open(COMPTEURS_ZERO))
+    except (OSError, ValueError):
+        zero = {}
+    for n, l in t.items():
+        if (noms is None or n in noms) and l.get("stats64"):
+            zero[n] = l["stats64"]
+    os.makedirs(RUN, exist_ok=True)
+    write_atomic(COMPTEURS_ZERO, json.dumps(zero), 0o644)
 
 
 def speed_of(name):
@@ -3431,6 +3683,90 @@ def x_ec(s):
         s.say("%-6s %-14s %-9s %s" % (po[2:], "%s(%s)" % (disp_if(po), state), proto, " ".join(mem)))
 
 
+# --- SSO (OpenID Connect) de l'interface web ---------------------------------------
+SSO_RETOUR = "/sso/retour"
+_SSO_DECOUVERTE = {}
+
+
+def sso_actif(m):
+    c = m.sso
+    return bool(c.get("issuer") and c.get("client_id") and c.get("secret")
+                and (c.get("admin_group") or c.get("read_group")))
+
+
+def sso_decouverte(issuer):
+    """/.well-known/openid-configuration de l'emetteur (garde 1 h)."""
+    import urllib.request
+    d = _SSO_DECOUVERTE.get(issuer)
+    if d and d[0] > time.time():
+        return d[1]
+    url = issuer.rstrip("/") + "/.well-known/openid-configuration"
+    with urllib.request.urlopen(url, timeout=10) as r:
+        conf = json.loads(r.read(200000).decode())
+    for k in ("issuer", "authorization_endpoint", "token_endpoint"):
+        if not str(conf.get(k, "")).startswith("https://") and k != "issuer":
+            raise ValueError("%s absent ou pas en https" % k)
+    if str(conf.get("issuer", "")).rstrip("/") != issuer.rstrip("/"):
+        raise ValueError("le fournisseur annonce un autre emetteur (%s)" % str(conf.get("issuer"))[:100])
+    _SSO_DECOUVERTE[issuer] = (time.time() + 3600, conf)
+    return conf
+
+
+def sso_niveau(m, groupes):
+    g = set(groupes or [])
+    if m.sso.get("admin_group") and m.sso["admin_group"] in g:
+        return 15
+    if m.sso.get("read_group") and m.sso["read_group"] in g:
+        return 1
+    return 0
+
+
+def sso_adresses_retour(m):
+    """Adresses de retour a declarer chez le fournisseur (Redirect URIs)."""
+    noms = []
+    dom = suffixe_dns(m)
+    if dom and dom != "local":
+        noms.append("%s.%s" % (m.hostname, dom))
+    for l in sh("ip -4 -o addr show 2>/dev/null").splitlines():
+        w = l.split()
+        if len(w) >= 4 and re.match(r"(vlan\d+|mgmt0)$", w[1].split("@")[0]):
+            noms.append(w[3].split("/")[0])
+    return ["https://%s%s" % (n, SSO_RETOUR) for n in noms]
+
+
+@EXEC.add("show ip http sso", "SSO de l'interface web : reglages et test du fournisseur")
+def x_show_sso(s):
+    c = s.m.sso
+    if not c:
+        s.say("SSO non configure. Exemple (Authentik) :")
+        s.say("  ip http sso issuer https://auth.exemple.lan/application/o/switchs/")
+        s.say("  ip http sso client-id <Client ID>")
+        s.say("  ip http sso client-secret <Client Secret>")
+        s.say("  ip http sso admin-group admins-reseau")
+        s.say("  ip http sso read-group support        (facultatif : lecture seule)")
+        s.say("Adresses de retour a declarer (Redirect URIs) :")
+        for u in sso_adresses_retour(s.m) or ["https://<adresse du switch>%s" % SSO_RETOUR]:
+            s.say("  " + u)
+        return
+    s.say("SSO (OpenID Connect) : %s" % ("ACTIF" if sso_actif(s.m) else "INCOMPLET"))
+    s.say("  Emetteur        : %s" % c.get("issuer", "-"))
+    s.say("  Client ID       : %s" % c.get("client_id", "-"))
+    s.say("  Client Secret   : %s" % ("defini" if c.get("secret") else "-"))
+    s.say("  Niveau 15       : groupe %s" % c.get("admin_group", "-"))
+    s.say("  Lecture seule   : groupe %s" % c.get("read_group", "-"))
+    s.say("  Bouton          : Se connecter avec %s" % c.get("label", "SSO"))
+    s.say("Adresses de retour a declarer (Redirect URIs) :")
+    for u in sso_adresses_retour(s.m) or ["https://<adresse du switch>%s" % SSO_RETOUR]:
+        s.say("  " + u)
+    if c.get("issuer"):
+        try:
+            d = sso_decouverte(c["issuer"])
+            s.say("Fournisseur      : joignable (%s)" % d.get("issuer"))
+        except Exception as e:
+            s.say("Fournisseur      : INJOIGNABLE (%s)" % str(e)[:150])
+    s.say("Les comptes locaux restent utilisables (secours si le fournisseur est en panne).")
+
+
 @EXEC.add("show ip interface brief", "Adresses IP du switch")
 def x_ipbrief(s):
     s.say("%-12s %-20s %-8s %s" % ("Interface", "IP-Address", "Method", "Status"))
@@ -3468,7 +3804,7 @@ def x_version(s):
         mem = "%d Mo" % (int(open("/proc/meminfo").readline().split()[1]) // 1024)
     except (OSError, ValueError, IndexError):
         pass
-    s.say("TL-SwitchOS Software, Version %s - TECH-LINUX" % VERSION)
+    s.say("TL-SwitchOS Software, Version %s" % VERSION)
     s.say("Kernel : Linux %s" % os.uname().release)
     s.say("%s uptime is %s" % (s.m.hostname, up.replace("up ", "")))
     s.say("Processor : %s, %s" % (cpu, mem))
@@ -3479,7 +3815,16 @@ def x_version(s):
     prev = lib_version(PREV)
     if prev:
         s.say("Previous software : %s (install rollback pour y revenir)" % prev)
-    s.say("Demarrage (GRUB) : %s" % ("protege (compte admin du switch)" if grub_protege()
+    img = image_compacte()
+    if img and image_live():
+        s.say("LIVE (CD / cle) : %s (%s), configuration en MEMOIRE, perdue a l'arret" % (
+            img.get("IMAGE", "?"), img.get("ARCH", "?")))
+        s.say("Installer sur le disque interne : install image disk")
+    elif img:
+        s.say("Image compacte : %s (%s), systeme %s" % (img.get("IMAGE", "?"), img.get("ARCH", "?"),
+                                                       "B" if image_slot() == 3 else "A"))
+    s.say("Demarrage (GRUB) : %s" % ("CD / cle live, pas de verrou" if img and image_live()
+                                     else "protege (compte admin du switch)" if grub_protege()
                                      else "verrou en cours de mise en place" if os.path.exists(GRUB_MDP)
                                      else "NON protege (pose a la prochaine connexion d'un admin)"))
     if s.m.stp_mode == "rstp" and not shutil.which("mstpctl"):
@@ -3866,6 +4211,40 @@ def x_shell(s):
         raise CliError("% Indisponible ici")
     log("shell Linux ouvert par %s" % s.user)
     subprocess.call(["/bin/bash", "-l"])
+
+
+@EXEC.add("clear counters", "Remettre a zero les compteurs de tous les ports")
+@priv15
+def x_clear_counters(s):
+    if s.interactive:
+        a = input("Clear \"show interface\" counters on all interfaces [confirm] ").strip().lower()
+        if a and not a.startswith(("y", "o")):
+            return
+    compteurs_zero()
+    log("compteurs remis a zero par %s" % s.user)
+
+
+@EXEC.add("clear counters <...>", "Remettre a zero les compteurs d'un port (ex : Gi1/0/1)")
+@priv15
+def x_clear_counters_if(s, text):
+    noms = expand_if_range(text.strip(), s.m.ports)
+    compteurs_zero(noms)
+    log("compteurs de %s remis a zero par %s" % (", ".join(disp_if(n) for n in noms), s.user))
+
+
+@EXEC.add("clear arp-cache", "Vider la table ARP")
+@EXEC.add("clear arp", "Vider la table ARP")
+@priv15
+def x_clear_arp(s):
+    sh("ip neigh flush all")
+    log("table ARP videe par %s" % s.user)
+
+
+@EXEC.add("clear lldp table", "Oublier les voisins LLDP (ils reviennent au prochain message)")
+@priv15
+def x_clear_lldp(s):
+    sh("systemctl restart lldpd 2>/dev/null")
+    log("table LLDP videe par %s" % s.user)
 
 
 @EXEC.add("clear", "Effacer l'ecran")
@@ -4519,6 +4898,8 @@ def maj_installer(src, force=False, sans_signature=False, out=print):
             raise MajError("version %s deja installee ou plus recente (ajoute 'force' pour la forcer)"
                            % VERSION)
         if man.get("type") == "majeure":
+            if image_compacte():
+                raise MajError("image compacte : Debian se met a niveau avec une nouvelle image (install image ...)")
             _majeure_prealables(man, say)
         staging = os.path.join(MAJ_DIR, "nouvelle")
         _extraire(blob, staging)
@@ -4765,6 +5146,220 @@ def x_install_sum(s):
         s.say("  " + line)
 
 
+# --- image compacte : mise a jour du systeme complet (systemes A/B) -----------
+
+def image_slot():
+    """Partition du systeme demarre (2 = A, 3 = B)."""
+    try:
+        return int(open(os.path.join(IMAGE_DATA, "slot-demarre")).read().strip())
+    except (OSError, ValueError):
+        return 2
+
+
+def _image_partition(n):
+    """(/dev/xxx, taille en octets) de la partition n du disque de l'image."""
+    src = subprocess.run(["findmnt", "-n", "-o", "SOURCE", IMAGE_DATA], capture_output=True, text=True).stdout
+    dev = os.path.basename(src.strip().splitlines()[0]) if src.strip() else ""
+    if not dev:
+        raise MajError("partition TLSDATA introuvable")
+    disk = os.path.basename(os.path.realpath("/sys/class/block/%s/.." % dev))
+    for p in sorted(os.listdir("/sys/block/" + disk)):
+        f = "/sys/block/%s/%s/partition" % (disk, p)
+        if os.path.exists(f) and open(f).read().strip() == str(n):
+            return "/dev/" + p, int(open("/sys/block/%s/%s/size" % (disk, p)).read()) * 512
+    raise MajError("partition %d de %s introuvable" % (n, disk))
+
+
+def _image_manifeste(parts, sans_signature=False):
+    import tempfile
+    if "MANIFEST.json" not in parts:
+        raise MajError("ce n'est pas une image TL-SwitchOS (manifeste absent ou mal place)")
+    signe = False
+    if os.path.exists(MAJ_PUB) and not sans_signature:
+        if "MANIFEST.sig" not in parts:
+            raise MajError("image NON signee : refusee (la cle de ce switch exige une signature)")
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, "m"), "wb").write(parts["MANIFEST.json"])
+            open(os.path.join(d, "s"), "wb").write(parts["MANIFEST.sig"])
+            r = subprocess.run(["openssl", "pkeyutl", "-verify", "-pubin", "-inkey", MAJ_PUB, "-rawin",
+                                "-in", os.path.join(d, "m"), "-sigfile", os.path.join(d, "s")],
+                               capture_output=True)
+        if r.returncode != 0:
+            raise MajError("signature INVALIDE : image refusee (modifiee, ou signee avec une autre cle)")
+        signe = True
+    try:
+        man = json.loads(parts["MANIFEST.json"].decode())
+    except ValueError:
+        raise MajError("manifeste illisible")
+    if not isinstance(man, dict) or man.get("produit") != "TL-SwitchOS" or man.get("type") != "image":
+        raise MajError("ce fichier n'est pas une image TL-SwitchOS (.tlsi)")
+    arch = image_compacte().get("ARCH")
+    if man.get("arch") != arch:
+        raise MajError("image pour %s, ce switch est en %s" % (man.get("arch"), arch))
+    man["signe"] = signe
+    return man
+
+
+def maj_image(src, force=False, sans_signature=False, out=print):
+    """install image : ecrit le nouveau systeme dans l'autre slot, puis redemarre dessus UNE fois.
+    Il ne devient le systeme par defaut que s'il demarre (tlswitch-image confirmer)."""
+    import hashlib
+    import tarfile
+    if not image_compacte():
+        raise MajError("ce switch n'est pas en image compacte : mise a jour par install add file (.tlsu)")
+    if image_live():
+        raise MajError("systeme live (CD / cle) : installe-le d'abord sur le disque (install image disk)")
+    os.makedirs(RUN, exist_ok=True)
+    lockf = open(os.path.join(RUN, "maj.lock"), "w")
+    try:
+        fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise MajError("une mise a jour est deja en cours")
+    say = MajJournal(out, de=VERSION)
+    autre = 3 if image_slot() == 2 else 2
+    ecrit = False
+    try:
+        # lu au fil de l'eau (aucune copie sur TLSDATA, trop petite pour une image)
+        if re.match(r"(?i)^https?://", src):
+            import urllib.request
+            say("Telechargement de %s" % src)
+            flux = urllib.request.urlopen(src, timeout=30)
+        else:
+            path = maj_source(src, say)
+            flux = open(path, "rb")
+        parts, man = {}, None
+        with flux, tarfile.open(fileobj=flux, mode="r|") as t:
+            for mb in t:
+                nom = os.path.normpath(mb.name)
+                if nom in ("MANIFEST.json", "MANIFEST.sig") and mb.isfile():
+                    parts[nom] = t.extractfile(mb).read(65536)
+                    continue
+                if nom != "systeme.squashfs" or not mb.isfile():
+                    continue
+                man = _image_manifeste(parts, sans_signature)
+                say.publier(vers=man["version"])
+                say("Image %s (%s, %s)" % (man.get("image"), man["arch"],
+                                           "signature valide" if man["signe"] else "NON signee"))
+                if man.get("image") == image_compacte().get("IMAGE") and not force:
+                    raise MajError("cette image est deja celle du switch (ajoute 'force' pour la reecrire)")
+                dev, taille = _image_partition(autre)
+                if mb.size > taille:
+                    raise MajError("image trop grande pour le slot (%d Mo, slot de %d Mo)"
+                                   % (mb.size // 1048576, taille // 1048576))
+                say("Ecriture du systeme %s dans le slot %s (%s, %d Mo)"
+                    % (man["version"], "B" if autre == 3 else "A", dev, mb.size // 1048576))
+                h, n, cran = hashlib.sha256(), 0, 0
+                f = t.extractfile(mb)
+                with open(dev, "r+b", buffering=0) as d:
+                    while True:
+                        b = f.read(1 << 20)
+                        if not b:
+                            break
+                        h.update(b)
+                        d.write(b)
+                        n += len(b)
+                        if n * 10 // max(mb.size, 1) > cran:
+                            cran = n * 10 // max(mb.size, 1)
+                            say("  %d %%" % (cran * 10))
+                    os.fsync(d.fileno())
+                if h.hexdigest() != man.get("sha256"):
+                    raise MajError("contenu altere (somme SHA256 differente du manifeste) : slot NON active")
+                ecrit = True
+                break
+        if not ecrit:
+            raise MajError("systeme.squashfs absent du fichier")
+        if not _image_boot():
+            raise MajError("partition TLSBOOT inaccessible")
+        r = subprocess.run(["grub-editenv", os.path.join(IMAGE_BOOT, "boot/grub/grubenv"), "set",
+                            "essai=%d" % autre], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise MajError("grubenv : %s" % r.stderr.strip())
+        write_atomic(os.path.join(VAR, "image-essai"), "%d %s\n" % (autre, man.get("image")), 0o644)
+        subprocess.run(["sync"])
+    except (MajError, OSError, tarfile.TarError, ValueError) as e:
+        say("ECHEC : %s" % e)
+        say.publier(etat="echec", erreur=str(e))
+        usb_umount()
+        raise MajError(str(e))
+    usb_umount()
+    if os.path.exists(STARTUP):
+        shutil.copy2(STARTUP, os.path.join(VAR, "startup-avant-maj.conf"))
+    _historique("%s -> image %s ecrite (slot %s), essai au redemarrage"
+                % (VERSION, man.get("image"), "B" if autre == 3 else "A"))
+    log("image %s ecrite dans le slot %d" % (man.get("image"), autre))
+    say("Le switch redemarre sur le nouveau systeme. S'il ne demarre pas, il revient tout seul a %s." % VERSION)
+    _redemarrer(say, man["version"])
+    return True
+
+
+@EXEC.add("install image <source>", "Image compacte : installer un nouveau systeme (.tlsi)")
+@priv15
+def x_install_image(s, src):
+    _install_image(s, src, False)
+
+
+@EXEC.add("install image <source> force", "Image compacte : reecrire meme si c'est la meme image")
+@priv15
+def x_install_image_force(s, src):
+    _install_image(s, src, True)
+
+
+def _install_image(s, src, force):
+    if not s.interactive:
+        raise CliError("% Mise a jour : depuis la console ou le SSH")
+    if not image_compacte():
+        raise CliError("% Ce switch n'est pas en image compacte : install add file <paquet.tlsu> activate")
+    a = input("Le nouveau systeme s'ecrit a cote de l'actuel, la configuration est conservee.\n"
+              "Le switch REDEMARRE a la fin (coupure d'environ 1 a 2 min). Proceed? [y/n] ").strip().lower()
+    if not a.startswith(("y", "o")):
+        return
+    try:
+        maj_image(src, force=force, out=_cli_say(s))
+    except MajError as e:
+        raise CliError("%% %s" % e)
+    s.say("Le switch redemarre. Reconnecte-toi dans 1 a 2 minutes.")
+
+
+@EXEC.add("show install image", "Image compacte : systemes A et B, place")
+def x_show_image(s):
+    if not image_compacte():
+        s.say("Installation Debian classique (pas d'image compacte).")
+        return
+    s.say(sh("/usr/local/sbin/tlswitch-image etat 2>&1").rstrip())
+
+
+@EXEC.add("install image disk", "Live CD : installer TL-SwitchOS sur un disque interne")
+@priv15
+def x_install_image_disk(s):
+    if not image_compacte():
+        raise CliError("% Ce switch n'est pas en image compacte (ni en live CD)")
+    if not s.interactive or not sys.stdin.isatty():
+        raise CliError("% Depuis la console ou le SSH")
+    # tlswitch-image pose les questions (disque, confirmation EFFACER) directement au terminal
+    r = subprocess.call(["/usr/local/sbin/tlswitch-image", "copier"])
+    if r == 0:
+        a = input("Redemarrer maintenant (retire d'abord le CD ou la cle) ? [y/n] ").strip().lower()
+        if a.startswith(("y", "o")):
+            subprocess.run(["systemctl", "reboot"])
+
+
+@EXEC.add("install image rollback", "Image compacte : revenir au systeme precedent")
+@priv15
+def x_install_image_rb(s):
+    if not image_compacte():
+        raise CliError("% Ce switch n'est pas en image compacte (voir install rollback)")
+    if not s.interactive:
+        raise CliError("% Depuis la console ou le SSH")
+    r = subprocess.run(["/usr/local/sbin/tlswitch-image", "retour"], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise CliError("%% %s" % (r.stderr.strip() or "retour impossible"))
+    s.say(r.stdout.strip())
+    a = input("Redemarrer maintenant ? [y/n] ").strip().lower()
+    if a.startswith(("y", "o")):
+        _historique("retour au systeme precedent (install image rollback)")
+        subprocess.run(["systemctl", "reboot"])
+
+
 # --- depot APT : TL-SwitchOS + Debian en une seule mise a jour -----------------
 APT_SOURCE = "/etc/apt/sources.list.d/tlswitch.sources"
 APT_ECHEC = os.path.join(VAR, "apt-echec")
@@ -4777,8 +5372,8 @@ def apt_maj_dispo(say):
     r = subprocess.run(["apt-get", "update", "-q"], capture_output=True, text=True, env=APT_ENV, timeout=600)
     if r.returncode != 0:
         raise MajError("depots injoignables : %s" % (r.stderr.strip().splitlines() or ["?"])[-1])
-    r = subprocess.run(["apt-get", "-s", "-q", "full-upgrade"], capture_output=True, text=True, env=APT_ENV,
-                       timeout=600)
+    r = subprocess.run(["apt-get", "-s", "-q", "upgrade" if image_compacte() else "full-upgrade"],
+                       capture_output=True, text=True, env=APT_ENV, timeout=600)
     paquets = []
     for line in r.stdout.splitlines():
         mo = re.match(r"^Inst (\S+) (?:\[(\S+)\] )?\((\S+)", line)
@@ -4796,6 +5391,13 @@ def apt_maj_dispo(say):
 def apt_mettre_a_jour(say):
     """Installe tout ce que proposent les depots (Debian + TL-SwitchOS). Renvoie True si redemarrage requis."""
     cmds = [["apt-get"] + APT_OPTS + ["install", "tlswitch"], ["apt-get"] + APT_OPTS + ["full-upgrade"]]
+    if image_compacte():
+        # image compacte : le noyau et les gros changements arrivent avec une nouvelle image
+        cmds[1] = ["apt-get"] + APT_OPTS + ["upgrade"]
+        libre = shutil.disk_usage(IMAGE_DATA if os.path.isdir(IMAGE_DATA) else "/").free
+        if libre < 64 * 1024 ** 2:
+            say("Place faible sur TLSDATA (%d Mo) : seul TL-SwitchOS est mis a jour" % (libre // 1024 ** 2))
+            cmds = cmds[:1]
     # paquet tlswitch deja marque installe mais version active plus ancienne (installation
     # precedente interrompue ou refusee) : on le reinstalle pour relancer la mise a jour
     r = subprocess.run(["dpkg-query", "-W", "-f=${Status} ${Version}", "tlswitch"], capture_output=True, text=True)
@@ -5095,6 +5697,14 @@ def main(argv):
         ok, msg = archive_now(m, motif)
         print(msg)
         return 0 if ok else 1
+    if cmd == "cert-web":
+        # appele par le client DHCP (nouvelle adresse, suffixe DNS) : certificat a jour
+        try:
+            print("certificat HTTPS refait" if cert_web(force="force" in args) else "certificat HTTPS a jour")
+        except OSError as e:
+            print("certificat HTTPS : %s" % e, file=sys.stderr)
+            return 1
+        return 0
     if cmd in ("apply", "check"):
         dry = "--dry-run" in args
         args = [a for a in args if a != "--dry-run"]
@@ -5122,6 +5732,14 @@ def main(argv):
         return 0
     print("Commande inconnue : %s (voir --help)" % cmd, file=sys.stderr)
     return 1
+
+
+# gestion centrale TL-Manager (module optionnel)
+try:
+    import tlswitch_central
+    tlswitch_central.register(sys.modules[__name__])
+except ImportError:
+    pass
 
 
 if __name__ == "__main__":

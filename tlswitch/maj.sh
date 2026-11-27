@@ -37,11 +37,22 @@ EOS
   sshd -t 2>/dev/null && systemctl reload ssh 2>/dev/null || true
 fi
 
+# certificat HTTPS : refait par le switch quand le DHCP donne une nouvelle adresse ou un
+# suffixe DNS (nom complet nom.suffixe dans le certificat, comme l'enregistrement DNS)
+if [ -d /etc/dhcp ]; then
+  install -d /etc/dhcp/dhclient-exit-hooks.d
+  cat > /etc/dhcp/dhclient-exit-hooks.d/tlswitch-certificat <<'EOS'
+# TL-SwitchOS : certificat HTTPS a jour (adresse et suffixe DNS donnes par le DHCP)
+case "$reason" in
+  BOUND|RENEW|REBIND|REBOOT) ( /usr/local/sbin/tlswitch cert-web >/dev/null 2>&1 & ) ;;
+esac
+EOS
+fi
 # certificat HTTPS d'un ancien modele (sans SAN, que Chrome refuse) : refait
 E=/etc/tlswitch
 if [ -f $E/web.crt ] && ! openssl x509 -in $E/web.crt -noout -ext subjectAltName 2>/dev/null | grep -q DNS; then
   H=$(hostname 2>/dev/null || echo tl-switch)
-  if openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=$H/O=TECH-LINUX" \
+  if openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=$H/O=TL-SwitchOS" \
       -addext "subjectAltName=DNS:$H,DNS:$H.local" -addext "basicConstraints=critical,CA:FALSE" \
       -addext "keyUsage=critical,digitalSignature,keyEncipherment" -addext "extendedKeyUsage=serverAuth" \
       -keyout $E/web.key.new -out $E/web.crt.new 2>/dev/null; then
@@ -86,6 +97,7 @@ fi
 cat > /usr/local/sbin/tlswitch-grub-auto <<'EOS'
 #!/bin/sh
 [ -f /etc/grub.d/01_tlswitch ] && exit 0
+[ -f /media/boot/boot/grub/mdp.cfg ] && exit 0
 exec /usr/bin/python3 /usr/local/lib/tlswitch/tlswitch.py grub-auto
 EOS
 chmod 755 /usr/local/sbin/tlswitch-grub-auto
@@ -199,6 +211,83 @@ Components: main
 Signed-By: /usr/share/keyrings/tlswitch-depot.gpg
 EOS
   fi
+fi
+
+# image compacte (petites machines : systeme squashfs A/B + couche modifiable)
+if [ -f /etc/tlswitch-image ] && [ -f $LIB/image/tlswitch-image ]; then
+  install -m 755 $LIB/image/tlswitch-image /usr/local/sbin/tlswitch-image
+  install -d /etc/initramfs-tools/scripts /etc/initramfs-tools/hooks
+  install -m 644 $LIB/image/initramfs-script /etc/initramfs-tools/scripts/tlswitch
+  install -m 755 $LIB/image/initramfs-hook /etc/initramfs-tools/hooks/tlswitch
+  cat > /etc/systemd/system/tlswitch-image-demarrage.service <<'EOS'
+[Unit]
+Description=TL-SwitchOS - image compacte : partitions et premier demarrage
+DefaultDependencies=no
+After=local-fs.target systemd-udevd.service
+Before=tlswitch.service ssh.service
+ConditionPathExists=/etc/tlswitch-image
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/tlswitch-image demarrage
+TimeoutStartSec=600
+StandardOutput=journal+console
+[Install]
+WantedBy=multi-user.target
+EOS
+  cat > /etc/systemd/system/tlswitch-image-ok.service <<'EOS'
+[Unit]
+Description=TL-SwitchOS - image compacte : le systeme demarre devient celui par defaut
+After=tlswitch.service
+Requires=tlswitch.service
+ConditionPathExists=/etc/tlswitch-image
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/tlswitch-image confirmer
+[Install]
+WantedBy=multi-user.target
+EOS
+  cat > /etc/systemd/system/tlswitch-copier.service <<'EOS'
+[Unit]
+Description=TL-SwitchOS - copie sur un disque interne
+After=tlswitch-image-demarrage.service systemd-udev-settle.service
+Before=getty@tty1.service
+ConditionKernelCommandLine=tlscopier
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c '/usr/local/sbin/tlswitch-image copier; echo; echo "  Entree = redemarrer"; read r; systemctl reboot'
+StandardInput=tty-force
+StandardOutput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+[Install]
+WantedBy=multi-user.target
+EOS
+  install -d /etc/systemd/system/tlswitch.service.d
+  printf '[Unit]\nWants=tlswitch-image-demarrage.service\nAfter=tlswitch-image-demarrage.service\n' \
+    > /etc/systemd/system/tlswitch.service.d/image.conf
+  systemctl enable tlswitch-image-demarrage.service tlswitch-image-ok.service tlswitch-copier.service >/dev/null 2>&1 || true
+fi
+
+# gestion centrale TL-Manager : service pose mais PAS active (c'est "central enable" qui l'active)
+if [ -f $LIB/tlswitch_central.py ]; then
+  cat > /etc/systemd/system/tlswitch-central.service <<'EOS'
+[Unit]
+Description=TL-SwitchOS - gestion centrale par TL-Manager (port 2507)
+After=tlswitch.service network-online.target
+Wants=tlswitch.service
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/lib/tlswitch/tlswitch_central.py serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOS
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl try-restart tlswitch-central.service 2>/dev/null || true
 fi
 
 # Paquet Debian necessaire a une nouvelle version : l'ajouter aux dependances du .deb

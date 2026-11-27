@@ -21,6 +21,10 @@ import sys
 import threading
 import time
 import urllib.parse
+import urllib.request
+import base64
+import hashlib
+import re
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tlswitch as T  # noqa: E402
@@ -29,18 +33,21 @@ STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 CERT = os.path.join(T.ETC, "web.crt")
 KEY = os.path.join(T.ETC, "web.key")
 SESSION_TTL = 30 * 60
+SSO_MAX = 12 * 3600         # une session SSO se refait chez le fournisseur au bout de 12 h
 REVERT = 90                 # secondes laissees au navigateur pour confirmer
 
 SESSIONS = {}               # sid -> dict
+SSO_ATTENTE = {}            # state -> {nonce, verifier, retour, exp}
 FAILS = {}                  # ip -> [compteur, debut]
 LOCK = threading.Lock()
 
 
-def new_session(user, priv, must_change=False):
+def new_session(user, priv, must_change=False, sso=False, groupes=None):
     sid = secrets.token_urlsafe(32)
     with LOCK:
         SESSIONS[sid] = {"user": user, "priv": priv, "csrf": secrets.token_urlsafe(24),
-                         "exp": time.time() + SESSION_TTL, "console": None, "must_change": must_change}
+                         "exp": time.time() + SESSION_TTL, "console": None, "must_change": must_change,
+                         "sso": sso, "groupes": list(groupes or []), "fin": time.time() + SSO_MAX}
     return sid
 
 
@@ -54,6 +61,23 @@ def get_session(sid):
         s = SESSIONS.get(sid)
         if not s:
             return None
+    # compte SSO : valable tant que le SSO reste configure, 12 h au plus ; le niveau suit
+    # les groupes autorises de la config (groupe retire ou change : niveau revu ou session fermee)
+    if s.get("sso"):
+        try:
+            m = T.load_running()[0]
+            niveau = T.sso_niveau(m, s.get("groupes")) if T.sso_actif(m) else 0
+        except Exception:
+            niveau = 0
+        with LOCK:
+            if not niveau or now > s.get("fin", 0):
+                SESSIONS.pop(sid, None)
+                return None
+            if niveau != s["priv"]:
+                s["priv"] = niveau
+                s["console"] = None
+            s["exp"] = now + SESSION_TTL
+            return s
     # compte supprime ou niveau change depuis la connexion : la session suit la config
     try:
         u = T.load_running()[0].users.get(s["user"])
@@ -147,6 +171,11 @@ def state(priv=15):
         "stp_priority": m.stp_priority, "lldp": m.lldp, "snmp": (m.snmp_community or "") if priv >= 15 else ("***" if m.snmp_community else ""),
         "snmp_location": m.snmp_location, "users": [{"name": u, "priv": v[0]} for u, v in sorted(m.users.items())],
         "unsaved": T.unsaved(), "rollback": T.rollback_pending(), "errors": errs,
+        "domain": m.domain, "domain_vu": T.suffixe_dns(m),
+        "sso": ({"issuer": m.sso.get("issuer", ""), "client_id": m.sso.get("client_id", ""),
+                 "secret": bool(m.sso.get("secret")), "admin_group": m.sso.get("admin_group", ""),
+                 "read_group": m.sso.get("read_group", ""), "label": m.sso.get("label", ""),
+                 "actif": T.sso_actif(m), "retours": T.sso_adresses_retour(m)} if priv >= 15 else None),
     }
 
 
@@ -271,9 +300,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/me":
             s = get_session(self.sid())
             if not s:
-                return self.send(200, {"logged": False})
+                rep = {"logged": False}
+                try:
+                    m = T.load_running()[0]
+                    rep["host"] = m.hostname
+                    if T.sso_actif(m):
+                        rep["sso"] = m.sso.get("label") or "SSO"
+                except Exception:
+                    pass
+                return self.send(200, rep)
             return self.send(200, {"logged": True, "user": s["user"], "priv": s["priv"], "csrf": s["csrf"],
-                                   "must_change": s.get("must_change", False)})
+                                   "must_change": s.get("must_change", False), "sso": s.get("sso", False)})
+        if path == "/sso/debut":
+            return self.sso_debut()
+        if path == T.SSO_RETOUR:
+            return self.sso_retour()
         s = self.auth()
         if not s:
             return
@@ -314,6 +355,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     st["historique"] = []
                 st["signature"] = os.path.exists(T.MAJ_PUB)
                 return self.send(200, st)
+            if path == "/api/central":
+                if s["priv"] < 15:
+                    return self.send(403, {"error": "niveau 15 requis"})
+                try:
+                    import tlswitch_central
+                except ImportError:
+                    return self.send(200, {"absent": True})
+                return self.send(200, tlswitch_central.status())
             if path == "/api/log":
                 out = io.StringIO()
                 c = T.Session(T.load_running()[0])
@@ -324,6 +373,129 @@ class Handler(http.server.BaseHTTPRequestHandler):
             T.log("web : erreur %s" % e)
             return self.send(500, {"error": "erreur interne (voir show logging)"})
         self.send(404, {"error": "introuvable"})
+
+    # -- SSO (OpenID Connect, flux "authorization code" + PKCE) ------------------
+    def page(self, code, titre, texte, extra=None):
+        html = ("<!doctype html><html lang=fr><head><meta charset=utf-8><title>TL-SwitchOS</title>"
+                "<link rel=stylesheet href=/app.css></head><body><div class=login><div class=login-box>"
+                "<img src=/logo.svg alt='' class=login-logo><h1>%s</h1><p class=muted>%s</p>"
+                "<a class='btn primary block' href=/>Retour a la connexion</a></div></div></body></html>"
+                % (titre, texte))
+        self.send(code, html, "text/html", extra)
+
+    def adresse_retour(self):
+        host = self.headers.get("Host", "")
+        if not re.fullmatch(r"[A-Za-z0-9.\-]+(:\d+)?|\[[0-9A-Fa-f:.]+\](:\d+)?", host):
+            raise ValueError("en-tete Host invalide")
+        return "https://%s%s" % (host, T.SSO_RETOUR)
+
+    def sso_debut(self):
+        try:
+            m = T.load_running()[0]
+            if not T.sso_actif(m):
+                return self.page(404, "SSO non configure", "Connecte-toi avec un compte du switch.")
+            conf = T.sso_decouverte(m.sso["issuer"])
+            state, nonce = secrets.token_urlsafe(24), secrets.token_urlsafe(24)
+            verifier = secrets.token_urlsafe(48)
+            defi = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+            retour = self.adresse_retour()
+            with LOCK:
+                for k in [k for k, v in SSO_ATTENTE.items() if v["exp"] < time.time()]:
+                    SSO_ATTENTE.pop(k, None)
+                if len(SSO_ATTENTE) > 1000:
+                    SSO_ATTENTE.clear()
+                SSO_ATTENTE[state] = {"nonce": nonce, "verifier": verifier, "retour": retour,
+                                      "exp": time.time() + 600}
+            q = urllib.parse.urlencode({"response_type": "code", "client_id": m.sso["client_id"],
+                                        "redirect_uri": retour, "scope": "openid profile email",
+                                        "state": state, "nonce": nonce, "code_challenge": defi,
+                                        "code_challenge_method": "S256"})
+            url = conf["authorization_endpoint"] + ("&" if "?" in conf["authorization_endpoint"] else "?") + q
+            # le navigateur qui revient doit etre celui qui est parti (contre la connexion forcee)
+            self.send(302, b"", "text/plain", {"Location": url, "Set-Cookie":
+                      "tlssso=%s; Path=/sso; Max-Age=600; HttpOnly; Secure; SameSite=Lax" % state})
+        except Exception as e:
+            T.log("web : SSO indisponible : %s" % e)
+            self.page(502, "Fournisseur SSO injoignable", "Le switch n'arrive pas a joindre le fournisseur "
+                      "d'identite. Connecte-toi avec un compte du switch (show ip http sso pour le detail).")
+
+    def sso_retour(self):
+        ip = self.client_address[0]
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        state = (q.get("state") or [""])[0]
+        cookie = ""
+        for part in self.headers.get("Cookie", "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == "tlssso":
+                cookie = v
+        with LOCK:
+            att = SSO_ATTENTE.pop(state, None)
+        efface = "tlssso=; Path=/sso; Max-Age=0; HttpOnly; Secure; SameSite=Lax"
+        if not att or att["exp"] < time.time() or not secrets.compare_digest(cookie, state):
+            return self.page(400, "Connexion SSO expiree", "Recommence depuis la page de connexion.",
+                             {"Set-Cookie": efface})
+        if q.get("error"):
+            return self.page(403, "Connexion refusee", "Le fournisseur a refuse : %s"
+                             % re.sub(r"[^A-Za-z0-9 _.-]", "", (q.get("error") or [""])[0])[:60],
+                             {"Set-Cookie": efface})
+        try:
+            m = T.load_running()[0]
+            conf = T.sso_decouverte(m.sso["issuer"])
+            data = urllib.parse.urlencode({"grant_type": "authorization_code", "code": (q.get("code") or [""])[0],
+                                           "redirect_uri": att["retour"], "client_id": m.sso["client_id"],
+                                           "client_secret": m.sso["secret"],
+                                           "code_verifier": att["verifier"]}).encode()
+            req = urllib.request.Request(conf["token_endpoint"], data=data,
+                                         headers={"Content-Type": "application/x-www-form-urlencoded",
+                                                  "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                jet = json.loads(r.read(500000).decode())
+            # jeton recu directement du fournisseur en HTTPS verifie (OIDC Core 3.1.3.7) :
+            # on controle emetteur, destinataire, date et nonce
+            p = jet["id_token"].split(".")[1]
+            claims = json.loads(base64.urlsafe_b64decode(p + "=" * (-len(p) % 4)).decode())
+            aud = claims.get("aud")
+            aud = aud if isinstance(aud, list) else [aud]
+            if claims.get("iss") != conf.get("issuer"):
+                raise ValueError("emetteur inattendu")
+            if m.sso["client_id"] not in aud:
+                raise ValueError("jeton destine a un autre client")
+            if float(claims.get("exp", 0)) < time.time() - 60:
+                raise ValueError("jeton expire")
+            if not secrets.compare_digest(str(claims.get("nonce", "")), att["nonce"]):
+                raise ValueError("nonce invalide")
+            if "groups" not in claims and conf.get("userinfo_endpoint") and jet.get("access_token"):
+                req = urllib.request.Request(conf["userinfo_endpoint"],
+                                             headers={"Authorization": "Bearer " + jet["access_token"]})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    info = json.loads(r.read(200000).decode())
+                if info.get("sub") == claims.get("sub"):
+                    claims.update({k: v for k, v in info.items() if k in ("groups", "preferred_username", "email")})
+        except Exception as e:
+            T.log("web : SSO, connexion refusee depuis %s : %s" % (ip, e))
+            return self.page(403, "Connexion SSO impossible", "Le jeton du fournisseur n'a pas pu etre verifie "
+                             "(voir show logging).", {"Set-Cookie": efface})
+        user = re.sub(r"[^A-Za-z0-9._@-]", "", str(claims.get("preferred_username") or claims.get("email")
+                                                  or claims.get("sub") or ""))[:64]
+        groupes = claims.get("groups") or []
+        if isinstance(groupes, str):
+            groupes = [groupes]
+        niveau = T.sso_niveau(m, [str(g) for g in groupes])
+        if not user or not niveau:
+            T.log("web : SSO, %s refuse (aucun groupe autorise) depuis %s" % (user or "?", ip))
+            return self.page(403, "Acces refuse", "Ton compte (%s) n'est dans aucun groupe autorise sur ce "
+                             "switch." % (user or "?"), {"Set-Cookie": efface})
+        sid = new_session(user, niveau, sso=True, groupes=[str(g) for g in groupes])
+        T.log("web : connexion SSO de %s (niveau %d) depuis %s" % (user, niveau, ip))
+        html = "<!doctype html><meta charset=utf-8><meta http-equiv=refresh content='0;url=/'><a href=/>Continuer</a>"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(html.encode())))
+        self.headers_common()
+        self.send_header("Set-Cookie", "tlsid=%s; Path=/; HttpOnly; Secure; SameSite=Strict" % sid)
+        self.send_header("Set-Cookie", efface)
+        self.end_headers()
+        self.wfile.write(html.encode())
 
     def static(self, name, ctype):
         try:
@@ -365,6 +537,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 SESSIONS.pop(self.sid(), None)
             return self.send(200, {"ok": True}, extra={"Set-Cookie": "tlsid=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict"})
         try:
+            if path == "/api/central/accept":
+                s = self.auth(write=True)
+                if s:
+                    import tlswitch_central
+                    try:
+                        d = tlswitch_central.accept(str(data.get("code", ""))[:12], s["user"], T.log)
+                    except ValueError as e:
+                        return self.send(200, {"error": str(e)})
+                    return self.send(200, {"ok": True, "nom": d.get("nom", ""), "ip": d.get("ip", "")})
+                return
             if path == "/api/password":
                 s = self.auth()
                 if s:
@@ -372,6 +554,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     u = m.users.get(s["user"])
                     old = str(data.get("old", ""))[:128]
                     new = str(data.get("new", ""))[:128]
+                    if s.get("sso"):
+                        return self.send(200, {"error": "compte SSO : le mot de passe se change chez le fournisseur"})
                     if u and u[1] is None:
                         return self.send(200, {"error": "compte RADIUS : le mot de passe se change dans l'annuaire"})
                     if not u or (not s.get("must_change") and not T.check_secret(old, u[1])):

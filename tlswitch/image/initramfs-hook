@@ -1,0 +1,16 @@
+#!/bin/sh
+# TL-SwitchOS (image compacte) : outils et modules de l'initramfs
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in prereqs) prereqs; exit 0;; esac
+. /usr/share/initramfs-tools/hook-functions
+manual_add_modules squashfs overlay ext4 vfat loop isofs sr_mod cdrom usb-storage uas
+copy_exec /sbin/losetup /sbin/losetup
+copy_exec /sbin/e2fsck /sbin/e2fsck
+# Les ports du switch sont renommes (ge1, ge2...) par le systeme, pas par l'initramfs :
+# sans cette regle, les cartes gardent le nom du noyau (eth0) jusqu'au vrai systeme,
+# qui peut alors leur donner le nom TL-SwitchOS.
+for r in lib/udev/rules.d/80-net-setup-link.rules usr/lib/udev/rules.d/80-net-setup-link.rules; do
+	rm -f "${DESTDIR}/$r"
+done
+exit 0

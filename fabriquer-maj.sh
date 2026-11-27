@@ -40,7 +40,7 @@ cle
 
 echo "==> Paquet TL-SwitchOS $VERSION ($TYPE${DEBIAN:+, Debian $DEBIAN})"
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
-python3 -m py_compile "$PKG/tlswitch.py" "$PKG/tlswitch_web.py"
+python3 -m py_compile "$PKG/tlswitch.py" "$PKG/tlswitch_web.py" "$PKG/tlswitch_central.py"
 tar czf "$W/paquet.tar.gz" --owner=0 --group=0 --exclude=__pycache__ --exclude='*.pyc' -C "$HERE" tlswitch
 SUM=$(sha256sum "$W/paquet.tar.gz" | cut -d' ' -f1)
 TLS_V="$VERSION" TLS_SUM="$SUM" TLS_NOTES="$NOTES" TLS_TYPE="$TYPE" TLS_DEB="$DEBIAN" python3 - > "$W/MANIFEST.json" <<'PY'

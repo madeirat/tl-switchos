@@ -14,7 +14,7 @@
 #  Structure produite (a servir en HTTP(S)) :
 #     <depot>/pool/main/t/tlswitch/tlswitch_X.Y.Z_all.deb
 #     <depot>/dists/stable/{Release,InRelease,Release.gpg}
-#     <depot>/dists/stable/main/binary-amd64/Packages{,.gz}  (paquets Architecture: all)
+#     <depot>/dists/stable/main/binary-{amd64,arm64}/Packages{,.gz}  (paquets Architecture: all)
 #     <depot>/tlswitch-depot.gpg        cle publique du depot
 #
 #  Sur le switch : deb [signed-by=/usr/share/keyrings/tlswitch-depot.gpg] <url> stable main
@@ -48,15 +48,18 @@ case "$ACTION" in
     install -d "$DEPOT/pool/main/t/tlswitch"
     for d in "$@"; do cp "$d" "$DEPOT/pool/main/t/tlswitch/"; done
     cd "$DEPOT"
-    install -d dists/stable/main/binary-amd64
-    apt-ftparchive packages pool > dists/stable/main/binary-amd64/Packages
-    gzip -9nkf dists/stable/main/binary-amd64/Packages
+    # paquet tlswitch "Architecture: all" : le meme index pour les PC et les cartes ARM (image compacte)
+    for A in amd64 arm64; do
+      install -d dists/stable/main/binary-$A
+      apt-ftparchive packages pool > dists/stable/main/binary-$A/Packages
+      gzip -9nkf dists/stable/main/binary-$A/Packages
+    done
     apt-ftparchive \
       -o APT::FTPArchive::Release::Origin=TL-SwitchOS \
       -o APT::FTPArchive::Release::Label=TL-SwitchOS \
       -o APT::FTPArchive::Release::Suite=stable \
       -o APT::FTPArchive::Release::Codename=stable \
-      -o APT::FTPArchive::Release::Architectures=amd64 \
+      -o APT::FTPArchive::Release::Architectures="amd64 arm64" \
       -o APT::FTPArchive::Release::Components=main \
       release dists/stable > dists/stable/Release.tmp
     mv dists/stable/Release.tmp dists/stable/Release

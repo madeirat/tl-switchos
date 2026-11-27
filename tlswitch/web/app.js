@@ -131,8 +131,15 @@ const TITLES = Object.fromEntries(NAV.flatMap((g) => g[1]));
 const ICON_OF = { dash: "dash", ports: "ports", tables: "tables", vlans: "vlan", lag: "lag", sys: "sys", users: "users", cfg: "cfg", maj: "maj", console: "console" };
 
 /* ---------- connexion ---------- */
+function loginInfo(me) {
+  if (me.host) $("#loginHost").textContent = "Administration de " + me.host;
+  $("#ssoBox").classList.toggle("hidden", !me.sso);
+  if (me.sso) $("#ssoBtn").textContent = "Se connecter avec " + me.sso;
+}
 function showLogin() {
   $("#app").classList.add("hidden"); $("#pwc").classList.add("hidden"); $("#login").classList.remove("hidden"); clearInterval(TIMER);
+  api("/api/me").then((me) => { if (!me.logged) loginInfo(me); }).catch(() => {});
+  setTimeout(() => $("#lu").focus(), 50);
 }
 document.addEventListener("DOMContentLoaded", init);
 async function init() {
@@ -165,14 +172,14 @@ async function init() {
   $("#modal").addEventListener("click", (ev) => { if (ev.target.id === "modal") closeModal(); });
   document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeModal(); });
   const me = await api("/api/me");
-  if (me.logged) await start(); else showLogin();
+  if (me.logged) await start(); else { loginInfo(me); showLogin(); }
 }
 async function start() {
   ME = await api("/api/me"); CSRF = ME.csrf;
   $("#login").classList.add("hidden");
   if (ME.must_change) { $("#app").classList.add("hidden"); $("#pwc").classList.remove("hidden"); setTimeout(() => $("#pn1").focus(), 50); return; }
   $("#pwc").classList.add("hidden"); $("#app").classList.remove("hidden");
-  $("#who").textContent = ME.user + (isAdmin() ? " · admin" : " · lecture");
+  $("#who").textContent = ME.user + (isAdmin() ? " · admin" : " · lecture") + (ME.sso ? " · SSO" : "");
   $("#saveBtn").classList.toggle("hidden", !isAdmin());
   await refresh(); go(VIEW);
   clearInterval(TIMER); TIMER = setInterval(() => { if (VIEW === "dash" || VIEW === "ports") refresh(true); else refreshHeader(); }, 4000);
@@ -222,14 +229,14 @@ function rate(p, key) { return HIST[p.name] ? fmtRate(rateOf(p.name, key)) : "-"
 /* ---------- panneau lateral (detail + edition) ---------- */
 function openModal(title, body, cmdsFn, okLabel, top) {
   const prev = h("div", { class: "preview" });
-  const upd = () => { const c = cmdsFn(); prev.textContent = c.length ? c.join("\n") : "(aucune modification)"; };
+  const upd = () => { if (!cmdsFn) return; const c = cmdsFn(); prev.textContent = c.length ? c.join("\n") : "(aucune modification)"; };
   const box = h("div", {},
     h("div", { class: "drawer-h" }, h("div", {}, h("h2", {}, title)), h("button", { class: "icon-btn", onclick: closeModal, "aria-label": "Fermer" }, icon("x"))),
     top || "", body,
-    h("div", { class: "sect" }, h("label", {}, "Commandes CLI qui seront envoyées"), prev),
+    cmdsFn ? h("div", { class: "sect" }, h("label", {}, "Commandes CLI qui seront envoyées"), prev) : null,
     h("div", { class: "modal-actions" },
       h("button", { class: "btn", onclick: closeModal }, "Fermer"),
-      isAdmin() ? h("button", { class: "btn primary", onclick: async () => { const c = cmdsFn(); if (!c.length) return closeModal(); closeModal(); await sendCmds(c); } }, okLabel || "Appliquer") : null));
+      isAdmin() && cmdsFn ? h("button", { class: "btn primary", onclick: async () => { const c = cmdsFn(); if (!c.length) return closeModal(); closeModal(); await sendCmds(c); } }, okLabel || "Appliquer") : null));
   body.addEventListener("input", upd); body.addEventListener("change", upd); upd();
   $("#modalBox").replaceChildren(box); $("#modal").classList.remove("hidden");
 }
@@ -361,8 +368,12 @@ VIEWS.ports = () => {
   search.addEventListener("input", () => { PORT_Q = search.value; box.replaceChildren(portTable(false)); });
   const seg = h("div", { class: "seg" }, [["all", "Tous"], ["up", "Connectés"], ["down", "Sans lien"], ["trunk", "Trunks"]].map(([k, t]) =>
     h("button", { class: PORT_FILTER === k ? "on" : "", onclick: () => { PORT_FILTER = k; render(); } }, t)));
+  const raz = isAdmin() ? h("button", { class: "btn small", title: "clear counters", onclick: async () => {
+    if (!confirm("Remettre à zéro les compteurs de tous les ports ?")) return;
+    try { await api("/api/exec", { line: "clear counters" }); toast("Compteurs remis à zéro"); refresh(); } catch (e) { toast(e.message, true); }
+  } }, "Compteurs à zéro") : null;
   return h("div", {}, h("div", { class: "card" }, faceplate()),
-    h("div", { class: "card" }, h("div", { class: "toolbar" }, search, seg), box));
+    h("div", { class: "card" }, h("div", { class: "toolbar" }, search, seg, raz), box));
 };
 
 function editPort(p) {
@@ -532,6 +543,7 @@ VIEWS.sys = () => {
   const hn = h("input", { value: ST.hostname });
   const gw = h("input", { value: ST.gateway || "", placeholder: "192.168.1.1" });
   const dns = h("input", { value: ST.dns.join(" "), placeholder: "192.168.1.1" });
+  const dom = h("input", { value: ST.domain || "", placeholder: ST.domain_vu && !ST.domain ? ST.domain_vu + " (donné par le DHCP)" : "exemple.lan" });
   const ntp = h("input", { value: ST.ntp.join(" "), placeholder: "192.168.1.1" });
   const stp = sel([["rstp", "RSTP (rapide, recommandé)"], ["stp", "STP classique"], ["none", "Désactivé"]], ST.stp_mode);
   const prio = sel(Array.from({ length: 16 }, (_, i) => [i * 4096, i * 4096 + (i === 8 ? " (défaut)" : i === 0 ? " (racine forcée)" : "")]), ST.stp_priority);
@@ -542,6 +554,7 @@ VIEWS.sys = () => {
     const c = [];
     if (hn.value.trim() && hn.value.trim() !== ST.hostname) c.push("hostname " + hn.value.trim());
     if (gw.value.trim() !== (ST.gateway || "")) c.push(gw.value.trim() ? "ip default-gateway " + gw.value.trim() : "no ip default-gateway");
+    if (dom.value.trim().toLowerCase() !== (ST.domain || "")) c.push(dom.value.trim() ? "ip domain-name " + dom.value.trim() : "no ip domain-name");
     if (dns.value.trim() !== ST.dns.join(" ")) { c.push("no ip name-server"); if (dns.value.trim()) c.push("ip name-server " + dns.value.trim()); }
     if (ntp.value.trim() !== ST.ntp.join(" ")) { ST.ntp.forEach((n) => c.push("no ntp server " + n)); ntp.value.trim().split(/\s+/).filter(Boolean).forEach((n) => c.push("ntp server " + n)); }
     if (stp.value !== ST.stp_mode) c.push(stp.value === "none" ? "no spanning-tree" : "spanning-tree mode " + stp.value);
@@ -560,10 +573,36 @@ VIEWS.sys = () => {
       isAdmin() ? h("button", { class: "btn", style: "margin-top:10px", onclick: () => editSvi(null) }, "Ajouter une interface Vlan") : null,
       ST.ips.some((i) => i.if === "Mgmt0") ? h("p", { class: "muted" }, "Port de gestion dédié Mgmt0 : " + ST.ips.filter((i) => i.if === "Mgmt0").map((i) => i.addr).join(", ") + " (hors switch, toujours joignable)") : null),
     h("div", { class: "grid2" },
-      h("div", { class: "card" }, h("h3", {}, "Général"), field("Nom du switch", hn), field("Passerelle par défaut", gw), field("Serveurs DNS (séparés par des espaces)", dns), field("Serveurs NTP", ntp)),
+      h("div", { class: "card" }, h("h3", {}, "Général"), field("Nom du switch", hn), field("Passerelle par défaut", gw), field("Serveurs DNS (séparés par des espaces)", dns),
+        field("Suffixe DNS", dom, "Nom complet du switch : " + (hn.value || ST.hostname) + "." + (ST.domain || ST.domain_vu || "suffixe") + ". Il est mis dans le certificat HTTPS avec l'adresse IP."),
+        field("Serveurs NTP", ntp)),
       h("div", { class: "card" }, h("h3", {}, "Protocoles"), field("Spanning-tree", stp), field("Priorité du pont", prio), h("label", { class: "check" }, lldp, "LLDP (découverte des voisins)"), field("Communauté SNMP v2c (lecture)", snmp), field("Emplacement SNMP", loc))),
-    isAdmin() ? h("button", { class: "btn primary", onclick: () => { const c = sysCmds(); if (!c.length) return toast("Rien à changer"); openModal("Appliquer les paramètres système", h("div", {}), () => c); } }, "Appliquer…") : null);
+    isAdmin() ? h("button", { class: "btn primary", onclick: () => { const c = sysCmds(); if (!c.length) return toast("Rien à changer"); openModal("Appliquer les paramètres système", h("div", {}), () => c); } }, "Appliquer…") : null,
+    isAdmin() ? centralCard() : null);
 };
+/* gestion centrale (TL-Manager) : appairage par code a 6 chiffres */
+function centralCard() {
+  const box = h("div", { class: "card" }, h("div", { class: "card-h" }, h("h3", {}, "Gestion centrale (TL-Manager)")), h("p", { class: "muted" }, "Chargement…"));
+  api("/api/central").then((c) => {
+    if (c.absent) { box.remove(); return; }
+    const code = h("input", { placeholder: "123456", inputmode: "numeric", maxlength: "6", style: "max-width:140px" });
+    const valider = async () => {
+      try { const r = await api("/api/central/accept", { code: code.value.trim() }); if (r.error) return toast(r.error, true); toast("TL-Manager " + (r.nom || "") + " (" + r.ip + ") appairé"); render(); } catch (e) { toast(e.message, true); }
+    };
+    const etat = c.manager ? "Géré par " + (c.manager.nom || "TL-Manager") + " (" + c.manager.ip + ") depuis " + c.manager.depuis
+      : c.active ? "Service actif sur le port " + c.port + ", en attente d'appairage" : "Désactivé (CLI : central enable)";
+    box.replaceChildren(
+      h("div", { class: "card-h" }, h("h3", {}, "Gestion centrale (TL-Manager)"),
+        h("span", { class: "pill " + (c.manager ? "ok" : "") }, h("span", { class: "dot " + (c.manager ? "ok" : "") }), c.manager ? "Appairé" : c.active ? "Actif" : "Désactivé")),
+      h("p", { class: "muted" }, etat + (c.allow && c.allow.length ? " · autorisés : " + c.allow.join(", ") : "")),
+      c.empreinte ? h("p", { class: "muted" }, "Empreinte du switch : ", h("code", {}, c.empreinte)) : null,
+      c.attente && c.attente.length ? h("div", {}, h("h4", {}, "Demandes d'appairage"),
+        c.attente.map((d) => h("p", {}, (d.nom || "TL-Manager") + " depuis " + d.ip)),
+        h("div", { class: "row" }, field("Code affiché par TL-Manager", code), h("button", { class: "btn primary", onclick: valider }, "Valider l'appairage")))
+        : c.active && !c.manager ? h("p", { class: "muted" }, "Aucune demande en cours : ajoute ce switch depuis TL-Manager, puis tape ici le code qu'il affiche.") : null);
+  }).catch(() => box.remove());
+  return box;
+}
 function editSvi(s) {
   const vid = sel(ST.vlans.map((v) => [v.id, v.id + " - " + v.name]), s ? s.vid : "");
   if (s) vid.disabled = true;
@@ -591,7 +630,9 @@ VIEWS.users = () => {
         if (n1.value !== n2.value) return toast("Les deux saisies sont différentes", true);
         try { const r = await api("/api/password", { old: o1.value, new: n1.value }); if (r.error) return toast(r.error, true); o1.value = n1.value = n2.value = ""; toast("Mot de passe changé et enregistré"); refresh(); } catch (e) { toast(e.message, true); }
       } }, "Changer")));
-  return h("div", {}, mine,
+  return h("div", {}, ME.sso ? h("div", { class: "card" }, h("h3", {}, "Mon compte (" + ME.user + ")"),
+      h("p", { class: "muted" }, "Connecté par SSO : le mot de passe se change chez le fournisseur d'identité.")) : mine,
+    isAdmin() && ST.sso ? ssoCard() : null,
     h("div", { class: "card tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Compte", "Niveau", ""].map((x) => h("th", {}, x)))),
       h("tbody", {}, ST.users.map((u) => h("tr", {}, h("td", {}, h("b", {}, u.name)), h("td", {}, u.priv === 15 ? "15 (admin)" : "1 (lecture)"),
         h("td", { style: "text-align:right" }, isAdmin() && u.name !== ME.user ? h("button", { class: "btn small danger", onclick: () => { if (confirm("Supprimer " + u.name + " ?")) sendCmds(["no username " + u.name]); } }, "Supprimer") : null)))))),
@@ -607,6 +648,47 @@ VIEWS.users = () => {
       h("div", { class: "card" }, h("h3", {}, "Mot de passe enable"), h("p", { class: "muted" }, "Demandé aux comptes de niveau 1 qui tapent enable en CLI."), field("Enable secret", en),
         h("button", { class: "btn primary", style: "margin-top:12px", onclick: () => { if (en.value.length < 8 || /\s/.test(en.value)) return toast("8 caractères minimum, sans espace", true); sendCmds(["enable secret 0 " + en.value]); en.value = ""; $("#cmdlogPre").textContent = $("#cmdlogPre").textContent.replace(/secret 0 \S+/g, "secret 0 ********"); } }, "Enregistrer"))) : null);
 };
+
+/* SSO (OpenID Connect) : Authentik, Keycloak, Entra ID... */
+function ssoCard() {
+  const c = ST.sso;
+  const iss = h("input", { value: c.issuer, placeholder: "https://auth.exemple.lan/application/o/switchs/" });
+  const cid = h("input", { value: c.client_id, autocomplete: "off" });
+  const sec = h("input", { type: "password", autocomplete: "new-password", placeholder: c.secret ? "défini (laisser vide pour le garder)" : "" });
+  const adm = h("input", { value: c.admin_group, placeholder: "ex : admins-reseau" });
+  const rd = h("input", { value: c.read_group, placeholder: "facultatif" });
+  const lab = h("input", { value: c.label, placeholder: "ex : Authentik" });
+  const copier = (u) => h("button", { class: "btn small", onclick: () => { navigator.clipboard && navigator.clipboard.writeText(u).then(() => toast("Copié")); } }, "Copier");
+  const appliquer = () => {
+    const l = [], v = (x) => x.value.trim();
+    if (v(iss) !== c.issuer) l.push(v(iss) ? "ip http sso issuer " + v(iss) : "no ip http sso issuer");
+    if (v(cid) !== c.client_id) l.push(v(cid) ? "ip http sso client-id " + v(cid) : "no ip http sso client-id");
+    if (v(sec)) l.push("ip http sso client-secret " + v(sec));
+    if (v(adm) !== c.admin_group) l.push(v(adm) ? "ip http sso admin-group " + v(adm) : "no ip http sso admin-group");
+    if (v(rd) !== c.read_group) l.push(v(rd) ? "ip http sso read-group " + v(rd) : "no ip http sso read-group");
+    if (v(lab) !== c.label) l.push(v(lab) ? "ip http sso label " + v(lab) : "no ip http sso label");
+    if (!l.length) return toast("Rien à changer");
+    sendCmds(l, "SSO enregistré (pense à Enregistrer la config)"); sec.value = "";
+    $("#cmdlogPre").textContent = $("#cmdlogPre").textContent.replace(/client-secret \S+/g, "client-secret ********");
+  };
+  const tester = async () => {
+    try { const r = await api("/api/exec", { line: "show ip http sso" }); openModal("Test du SSO", h("pre", { class: "log" }, r.output), null); } catch (e) { toast(e.message, true); }
+  };
+  return h("div", { class: "card" },
+    h("div", { class: "card-h" }, h("h3", {}, "Connexion SSO (OpenID Connect)"),
+      h("span", { class: "pill " + (c.actif ? "ok" : "") }, h("span", { class: "dot " + (c.actif ? "ok" : "") }), c.actif ? "Actif" : (c.issuer ? "Incomplet" : "Non configuré"))),
+    h("p", { class: "muted" }, "Authentik, Keycloak, Entra ID, Google… Crée chez le fournisseur une application OAuth2/OpenID (client confidentiel), avec les adresses de retour ci-dessous. Les groupes de l'utilisateur donnent le niveau : admin (15) ou lecture (1). Les comptes locaux restent utilisables en secours."),
+    h("div", { class: "grid2" },
+      h("div", {}, field("Émetteur (Issuer / OpenID Configuration URL sans .well-known)", iss), field("Client ID", cid), field("Client Secret", sec)),
+      h("div", {}, field("Groupe administrateurs (niveau 15)", adm), field("Groupe lecture seule (niveau 1)", rd), field("Texte du bouton", lab, "« Se connecter avec … » sur la page de connexion"))),
+    h("h4", {}, "Adresses de retour à déclarer (Redirect URIs)"),
+    c.retours.length ? h("div", { class: "uris" }, c.retours.map((u) => h("div", { class: "uri" }, h("code", {}, u), copier(u))))
+      : h("p", { class: "muted" }, "https://<adresse du switch>/sso/retour"),
+    h("div", { class: "row", style: "margin-top:12px" },
+      h("button", { class: "btn primary", onclick: appliquer }, "Appliquer"),
+      h("button", { class: "btn", onclick: tester }, "Tester le fournisseur"),
+      c.issuer ? h("button", { class: "btn danger", onclick: () => { if (confirm("Désactiver le SSO ? Les sessions SSO ouvertes seront fermées.")) sendCmds(["no ip http sso"]); } }, "Désactiver") : null));
+}
 
 VIEWS.tables = () => {
   const macBox = h("div", { class: "tablewrap" }, "Chargement…"), lldpBox = h("div", { class: "tablewrap" }, "Chargement…");
@@ -743,6 +825,7 @@ VIEWS.console = () => {
     if (ev.key !== "Enter") return;
     const line = inp.value; inp.value = "";
     if (line.trim()) { TERM_HIST.push(line); TERM_POS = TERM_HIST.length; }
+    if (/^\s*(do\s+)?(clear|cl|cle|clea)(\s+scr(e(e(n)?)?)?)?\s*$/i.test(line)) { out.textContent = ""; return; }
     out.textContent += promptEl.textContent + " " + line + "\n";
     try {
       const r = await api("/api/exec", { line });

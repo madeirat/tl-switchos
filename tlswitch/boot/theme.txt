@@ -1,4 +1,4 @@
-# TL-SwitchOS - theme GRUB (TECH-LINUX)
+# TL-SwitchOS - theme GRUB
 title-text: ""
 desktop-image: "grub-fond.png"
 desktop-image-scale-method: "stretch"

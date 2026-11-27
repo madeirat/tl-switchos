@@ -17,8 +17,11 @@
     <label>Utilisateur<input id="lu" autocomplete="username" required></label>
     <label>Mot de passe<input id="lp" type="password" autocomplete="current-password" required></label>
     <button class="btn primary block" type="submit">Connexion</button>
+    <div id="ssoBox" class="hidden">
+      <div class="login-sep"><span>ou</span></div>
+      <a id="ssoBtn" class="btn block" href="/sso/debut">Se connecter avec SSO</a>
+    </div>
     <p id="loginErr" class="err"></p>
-    <p class="login-foot">TECH-LINUX</p>
   </form>
 </div>
 

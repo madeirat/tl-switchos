@@ -2,6 +2,38 @@
 
 Numérotation **1.V.C** : V change avec les nouvelles fonctions, C avec les correctifs (sécurité et bugs). Une version corrective se met à jour sans rien changer à la configuration.
 
+## 1.1.0
+
+Nouvelles fonctions : **image compacte et live CD pour les petites machines**, **connexion SSO** à l'interface web, suffixe DNS, commandes `clear`.
+
+- **Image compacte** (`construire-image.sh`) : TL-SwitchOS tient sur un disque de **1 Go** et tourne avec **512 Mo de RAM**. Pour les mini PC, clients légers, boîtiers type Streamcore (CF, SATA DOM, eMMC) et cartes ARM multiport.
+  - Le système est compressé et en lecture seule (squashfs, environ 150 à 250 Mo) : une coupure de courant ne peut pas l'abîmer. Les réglages et la configuration sont sur une petite partition à part, agrandie toute seule au premier démarrage.
+  - Deux emplacements de système (A et B) : une mise à jour s'écrit à côté du système actuel et n'est gardée que si elle démarre. Sinon le switch revient tout seul à l'ancien système.
+  - Une seule image pour BIOS et UEFI. Elle s'écrit avec balenaEtcher, Rufus (mode DD) ou `dd`, sans installateur.
+  - Premier démarrage sans question : détection des ports, IP en DHCP, `admin` / `admin`. Le nom, le VLAN, l'IP et le mot de passe peuvent être réglés avant, dans `tlswitch.env`, sur la partition TLSBOOT lisible depuis Windows.
+  - Démarrage sur une clé USB, puis entrée GRUB **Copier TL-SwitchOS sur un disque interne** pour les boîtiers dont le disque n'est pas amovible.
+  - Tous les pilotes Ethernet du noyau Debian et les firmwares réseau de la 1.0.6 ; graphique, son, Wi-Fi, Bluetooth et systèmes de fichiers de serveur retirés.
+- **Live CD** (`TL-SwitchOS-<version>-<arch>-live.iso`, produit avec l'image) : une ISO hybride pour CD ou clé USB, BIOS et UEFI, d'environ 130 Mo. Elle démarre TL-SwitchOS sans rien écrire sur la machine (configuration en mémoire, perdue à l'arrêt), avec 512 Mo de RAM.
+  - Entrée **copie en mémoire** : le système est chargé en RAM, le CD ou la clé peut être retiré.
+  - Installation sur le disque interne depuis le menu, ou depuis le live avec `install image disk`. La configuration faite en live suit sur le disque.
+- **ARM 64 bits** : `bash construire-image.sh arm64` pour les cartes qui démarrent en UEFI (U-Boot récent, EDK2) ; `--carte <nom>` écrit en plus le U-Boot Debian de la carte au début de l'image.
+- Nouvelles commandes : `install image <source>` (nouveau système, fichier `.tlsi`, depuis une clé USB ou une URL), `install image rollback`, `show install image`. `show version` indique l'image et le système démarré.
+- En image compacte, `install update` installe TL-SwitchOS et les correctifs Debian sans changer le noyau (il arrive avec une nouvelle image). Les mises à jour majeures `.tlsu` y sont refusées : c'est une nouvelle image qui fait passer à la version suivante de Debian.
+- RADIUS : le module PAM est trouvé sur toutes les architectures (avant : x86_64 seulement).
+- **Connexion SSO à l'interface web (OpenID Connect)** : Authentik, Keycloak, Entra ID… Se règle dans **Comptes > Connexion SSO** ou en CLI (`ip http sso issuer|client-id|client-secret|admin-group|read-group|label`). Les groupes de l'utilisateur donnent le niveau : administrateur (15) ou lecture seule (1). La page de connexion affiche un bouton « Se connecter avec … ». `show ip http sso` donne les adresses de retour à déclarer chez le fournisseur et teste qu'il répond. Les comptes locaux restent utilisables en secours.
+- **Gestion centrale par TL-Manager** : `central enable` ouvre le port 2507 (mTLS), `central allow <adresse>` limite qui peut s'y connecter, `central accept <code>` valide l'appairage (code à 6 chiffres, aussi par un bouton dans **IP et système**), `show central`.
+- **Suffixe DNS** : nouvelle commande `ip domain-name <suffixe>` (aussi dans **IP et système**). Sans elle, le suffixe donné par le DHCP est repris. Le certificat HTTPS de l'interface web contient le nom du switch, son nom complet `nom.suffixe` et ses adresses de gestion. Il est refait tout seul quand l'un d'eux change (y compris à un nouveau bail DHCP). Un certificat importé n'est jamais remplacé.
+- **Commandes clear** : `clear counters` (tous les ports ou un seul), `clear arp-cache`, `clear lldp table`. `clear` efface aussi l'écran en mode configuration et dans la console de l'interface web. Les commandes `show` et `clear` marchent en mode configuration sans taper `do`. Bouton **Compteurs à zéro** dans la page Ports.
+- **Installation dans un VLAN tagué** : quand le VLAN de gestion n'est pas 1, l'ISO demande s'il arrive tagué sur le port branché. Si oui, l'installateur Debian passe par ce VLAN (avant : il prenait une adresse dans un autre VLAN, ou aucune, et les dépôts Debian étaient injoignables), et ce port devient un trunk du VLAN de gestion. Même chose avec le script sur une Debian déjà installée qui sort par une interface VLAN (ex. `eno1.250`), ou avec `TLS_UPLINK=<port>`.
+- **Debian installée sans miroir** : le script d'installation ajoute lui-même les dépôts Debian quand il n'y a que la ligne du CD, et retire cette ligne. Sans Internet, il dit ce qui manque (pas de route, ou DNS qui ne répond pas) au lieu d'une erreur d'apt.
+- **Sécurité** (relecture de la 1.1.0) :
+  - Session SSO : son niveau suit la config à chaque requête (groupe retiré ou changé : niveau revu ou session fermée) et elle dure 12 h au plus avant de repasser par le fournisseur.
+  - SSO : le fournisseur doit annoncer exactement l'émetteur configuré.
+  - Gestion centrale : la poignée de main TLS se fait dans le fil du client, un client muet ne bloque plus le port 2507.
+  - Le suffixe DNS reçu du DHCP n'est repris que s'il est un nom DNS valide (un serveur DHCP pirate ne peut plus glisser d'autres noms dans le certificat).
+  - `clear counters` demande le niveau 15, comme `clear arp-cache`.
+- Interface web : nom du switch sur la page de connexion, mode d'accès (SSO) affiché à côté du compte. Le nom de l'éditeur n'apparaît plus dans le produit (`show version`, menus, certificat).
+
 ## 1.0.6
 
 Correctif.

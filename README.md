@@ -29,6 +29,21 @@ TL-SwitchOS s'installe depuis une clé USB, comme un système de switch : une IS
 - Testé : machine virtuelle avec cartes Intel e1000e (VMware Workstation, QEMU/KVM). Cible : boîtier Atom D510 à 6 ports Intel.
 - Sous un hyperviseur, mettre une carte réseau virtuelle par port du switch.
 
+### Petites machines (image compacte)
+
+Pour un mini PC, un client léger, un boîtier type Streamcore ou une carte ARM : **512 Mo de RAM et 1 Go de disque suffisent**.
+
+```bash
+bash construire-image.sh            # PC x86_64, BIOS et UEFI
+bash construire-image.sh arm64      # cartes ARM 64 bits qui démarrent en UEFI
+```
+
+Le résultat `TL-SwitchOS-<version>-<arch>.img.xz` s'écrit tel quel sur la clé USB, la carte CF, le SATA DOM ou la carte SD (balenaEtcher, Rufus en mode DD, ou `xzcat … | dd of=/dev/sdX bs=4M`). Au premier démarrage le switch détecte ses ports et prend une IP en DHCP ; on peut régler avant le nom, le VLAN et l'IP dans `tlswitch.env` (partition TLSBOOT, lisible sous Windows).
+
+Le même script produit aussi un **live CD** (`TL-SwitchOS-<version>-<arch>-live.iso`, environ 130 Mo, CD ou clé USB, BIOS et UEFI) : il fait tourner le switch sans rien écrire sur la machine, puis l'installe sur le disque interne depuis le menu ou avec `install image disk`.
+
+Le système est en lecture seule, avec deux emplacements A et B : `install image usbflash0:TL-SwitchOS-<version>-<arch>.tlsi` écrit la nouvelle version à côté, et le switch revient seul à l'ancienne si elle ne démarre pas. Voir [docs/image-compacte.md](docs/image-compacte.md).
+
 ## Installation
 
 ### 1. Télécharger l'ISO

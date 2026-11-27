@@ -23,7 +23,7 @@ banner() {
    | | | |___  ___) \ V  V /| | || (__| | | | |_| |___) |
    |_| |_____||____/ \_/\_/ |_|\__\___|_| |_|\___/|____/
 EOF
-  printf "                 TECH-LINUX - installation${N}\n\n"
+  printf "                    installation${N}\n\n"
 }
 
 ask() {  # ask "question" "defaut" -> REPLY

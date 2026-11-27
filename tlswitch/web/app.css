@@ -225,3 +225,11 @@ p.bad{color:var(--red)}
   .grid{grid-template-columns:repeat(2,1fr);gap:10px}
   .kpi .v{font-size:20px}
 }
+/* 1.0.7 : SSO */
+.login-sep{display:flex;align-items:center;gap:10px;color:var(--faint);font-size:12px;margin:14px 0}
+.login-sep::before,.login-sep::after{content:"";flex:1;border-top:1px solid var(--line)}
+a.btn.block{display:block;text-align:center;text-decoration:none}
+.uris{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.uri{display:flex;align-items:center;gap:10px;background:var(--input);border:1px solid var(--line);border-radius:8px;padding:6px 10px}
+.uri code{flex:1;overflow:auto;font-size:12.5px;white-space:nowrap}
+.card h4{margin:16px 0 4px;font-size:13px;color:var(--muted,inherit)}

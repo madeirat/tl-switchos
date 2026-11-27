@@ -1,0 +1,362 @@
+#!/bin/bash
+# =============================================================================
+#  TL-SwitchOS - image compacte (petites machines, < 1 Go de disque)
+#
+#  Disque : p1 TLSBOOT (FAT : GRUB, grubenv, tlswitch.env)
+#           p2 / p3 systemes A et B (squashfs en lecture seule)
+#           p4 TLSDATA (ext4 : couche modifiable + configuration du switch)
+#
+#    tlswitch-image etat                 slots, versions, place
+#    tlswitch-image demarrage            (service, avant tlswitch) : /media/boot,
+#                                        agrandissement de TLSDATA, premier demarrage
+#    tlswitch-image confirmer            (service, apres tlswitch) : le systeme demarre
+#                                        devient le systeme par defaut
+#    tlswitch-image retour               repasse sur l'autre systeme (s'il existe)
+#    tlswitch-image usine                retour a la configuration d'usine (redemarre)
+#    tlswitch-image copier [/dev/xxx]    copie TL-SwitchOS sur un disque interne
+#                                        (sans disque : liste et question)
+#                                        Depuis le live CD : installe TL-SwitchOS
+#
+#  Live CD (ISO) : systeme lu sur le CD ou la cle (/media/live), configuration en
+#  memoire (/media/data), perdue a l'arret. Rien n'est ecrit sur les disques.
+# =============================================================================
+set -u
+BOOT=/media/boot
+DATA=/media/data
+ENVF=$BOOT/boot/grub/grubenv
+LOG=/var/log/tlswitch-image.log
+
+die() { echo "ERREUR : $*" >&2; exit 1; }
+log() { logger -t tlswitch "image : $*" 2>/dev/null; echo "$(date '+%F %T') $*" >> $LOG 2>/dev/null; }
+
+# --- disque et partitions (par sysfs : marche avec sda, mmcblk0p, nvme0n1p) ---
+data_dev()  { findmnt -n -o SOURCE "$DATA" 2>/dev/null | head -n 1; }
+disque_de() { basename "$(readlink -f "/sys/class/block/$(basename "$1")/..")"; }
+partition() {   # partition <disque> <numero> -> /dev/xxx
+  local p
+  for p in /sys/block/"$1"/"$1"*; do
+    [ -f "$p/partition" ] && [ "$(cat "$p/partition")" = "$2" ] && { echo "/dev/$(basename "$p")"; return 0; }
+  done
+  return 1
+}
+live() { grep -qw tlslive /proc/cmdline; }
+DISQUE=""
+init_disque() {
+  local d; d=$(data_dev)
+  live && die "systeme live (CD / cle) : rien a faire sur le disque. Pour l'installer : tlswitch-image copier"
+  [ -n "$d" ] || die "pas en image compacte (/media/data non monte)"
+  DISQUE=$(disque_de "$d")
+}
+slot_demarre() { cat $DATA/slot-demarre 2>/dev/null || echo 2; }
+autre_slot()   { [ "$1" = 2 ] && echo 3 || echo 2; }
+version_slot() {   # version de l'image d'un slot (vide si slot vide ou illisible)
+  local dev m v=""
+  dev=$(partition "$DISQUE" "$1") || return 0
+  if [ "$1" = "$(slot_demarre)" ]; then sed -n 's/^IMAGE=//p' /etc/tlswitch-image; return; fi
+  m=$(mktemp -d)
+  if mount -t squashfs -o ro "$dev" "$m" 2>/dev/null; then
+    v=$(sed -n 's/^IMAGE=//p' "$m/etc/tlswitch-image" 2>/dev/null); umount "$m"
+  fi
+  rmdir "$m"; echo "$v"
+}
+env_get() { grub-editenv "$ENVF" list 2>/dev/null | sed -n "s/^$1=//p"; }
+env_set() { mountpoint -q $BOOT || monter_boot; grub-editenv "$ENVF" set "$@" && sync; }
+
+monter_boot() {
+  init_disque
+  mountpoint -q $BOOT && return 0
+  local p; p=$(partition "$DISQUE" 1) || die "partition TLSBOOT introuvable"
+  install -d $BOOT
+  mount -t vfat -o noatime,umask=0077,flush "$p" $BOOT || die "montage de $p impossible"
+}
+
+# --- agrandit TLSDATA jusqu'a la fin du disque (premier demarrage) ---
+agrandir() {
+  init_disque
+  local d n fin taille debut
+  d=$(data_dev); n=$(cat "/sys/class/block/$(basename "$d")/partition")
+  taille=$(cat "/sys/block/$DISQUE/size")
+  debut=$(cat "/sys/class/block/$(basename "$d")/start")
+  fin=$((debut + $(cat "/sys/class/block/$(basename "$d")/size")))
+  # deja a la fin (a 4 Mo pres) : rien a faire
+  [ $((taille - fin)) -gt 8192 ] || return 0
+  log "agrandissement de $d jusqu'a la fin du disque"
+  echo ", +" | sfdisk --no-reread --no-tell-kernel -q -N "$n" "/dev/$DISQUE" >/dev/null 2>&1 || { log "sfdisk a echoue"; return 0; }
+  partx -u -n "$n" "/dev/$DISQUE" 2>/dev/null || true
+  resize2fs "$d" >/dev/null 2>&1 && log "TLSDATA : $(df -h --output=size $DATA | tail -1 | tr -d ' ')"
+}
+
+# --- premier demarrage : ports, configuration initiale (tlswitch.env de TLSBOOT) ---
+renommer_ports() {   # d'apres /etc/systemd/network/10-tlswitch-*.link (MAC -> nom)
+  local l mac nom d ok=0
+  for l in /etc/systemd/network/10-tlswitch-*.link; do
+    [ -f "$l" ] || continue
+    mac=$(sed -n 's/^PermanentMACAddress=//p' "$l"); nom=$(sed -n 's/^Name=//p' "$l")
+    [ -e "/sys/class/net/$nom" ] && continue
+    for d in /sys/class/net/*; do
+      [ -e "$d/device" ] && [ "$(cat "$d/address")" = "$mac" ] || continue
+      ip link set dev "$(basename "$d")" down 2>/dev/null
+      ip link set dev "$(basename "$d")" name "$nom" 2>/dev/null || ok=1
+    done
+    [ -e "/sys/class/net/$nom" ] || ok=1
+  done
+  return $ok
+}
+
+premier_demarrage() {
+  [ -f /etc/tlswitch/startup.conf ] && [ -s /etc/tlswitch/ports ] && return 0
+  local E=$BOOT/tlswitch.env T=/dev/console
+  live && E=/media/live/tlswitch.env
+  echo "TL-SwitchOS : premier demarrage, detection des ports" > $T
+  set -a
+  # shellcheck disable=SC1090
+  [ -f $E ] && . <(tr -d '\r' < $E | grep -E '^TLS_[A-Z_]+=')
+  set +a
+  export TLS_ETAPES="3 4 5 9" TLS_LOCK_ROOT=1 TLS_NONINTERACTIVE=1
+  if bash /usr/local/lib/tlswitch/installer-tlswitch.sh >> /var/log/tlswitch-install.log 2>&1; then
+    # le mot de passe eventuel ne reste pas en clair sur la partition FAT
+    [ -f $E ] && ! live && sed -i -E 's/^(TLS_ADMIN_PASS=).*/\1/' $E
+    # les ports prennent leur nom tout de suite (ils ne sont pas encore actives) ;
+    # aux demarrages suivants, c'est udev qui les nomme (fichiers .link)
+    if renommer_ports; then
+      log "premier demarrage termine : $(wc -l < /etc/tlswitch/ports) ports"
+      echo "TL-SwitchOS : ports et configuration prets" > $T
+      return 0
+    fi
+    log "premier demarrage termine, redemarrage pour nommer les ports"
+    echo "TL-SwitchOS : ports et configuration prets, redemarrage" > $T
+    sync; systemctl --no-block reboot
+    exit 0
+  fi
+  log "premier demarrage : echec (voir /var/log/tlswitch-install.log)"
+  echo "TL-SwitchOS : ECHEC du premier demarrage, voir /var/log/tlswitch-install.log" > $T
+  return 1
+}
+
+demarrage() {
+  if live; then
+    log "systeme live ($(sed -n 's/^IMAGE=//p' /etc/tlswitch-image)) : configuration en memoire"
+  else
+    monter_boot
+    agrandir
+  fi
+  # cles SSH propres a chaque switch (l'image n'en contient pas)
+  ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1 || ssh-keygen -A >/dev/null 2>&1
+  # copie sur disque interne : pas de premier demarrage ici, il se fera sur le disque copie
+  grep -qw tlscopier /proc/cmdline && return 0
+  premier_demarrage
+}
+
+confirmer() {
+  live && return 0
+  monter_boot
+  local s a; s=$(slot_demarre); a=$(env_get actif)
+  if [ "$s" != "$a" ]; then
+    env_set actif="$s"
+    log "systeme $(sed -n 's/^IMAGE=//p' /etc/tlswitch-image) (slot $s) confirme, il devient le systeme par defaut"
+    echo "$(date '+%Y-%m-%d %H:%M')  image $(sed -n 's/^IMAGE=//p' /etc/tlswitch-image) confirmee (systeme $([ "$s" = 3 ] && echo B || echo A))" >> /etc/tlswitch/historique-maj
+  fi
+  rm -rf $DATA/upper.ancienne
+  # essai d'une nouvelle image qui n'a pas demarre : on le dit dans l'historique
+  local E=/var/lib/tlswitch/image-essai n img
+  if [ -f $E ]; then
+    read -r n img < $E
+    if [ "$n" != "$s" ]; then
+      log "l'image $img n'a pas demarre : retour automatique au systeme $([ "$s" = 3 ] && echo B || echo A)"
+      echo "$(date '+%Y-%m-%d %H:%M')  image $img ANNULEE : elle n'a pas demarre, retour automatique au systeme $([ "$s" = 3 ] && echo B || echo A)" >> /etc/tlswitch/historique-maj
+    fi
+    rm -f $E
+  fi
+}
+
+etat() {
+  if live; then
+    local src; src=$(findmnt -n -o SOURCE /media/live 2>/dev/null | head -n 1)
+    case "$src" in /dev/*) ;; *) src="la memoire (CD / cle retirable)" ;; esac
+    echo "TL-SwitchOS LIVE ($(sed -n 's/^IMAGE=//p' /etc/tlswitch-image)), lu sur $src"
+    echo "  La configuration est en MEMOIRE : elle est perdue a l'arret du switch."
+    echo "  Installer sur le disque interne : install image disk (la configuration suit)"
+    echo "  Memoire libre   : $(df -h --output=avail /media/data | tail -1 | tr -d ' ')"
+    return 0
+  fi
+  monter_boot
+  local s o vs vo
+  s=$(slot_demarre); o=$(autre_slot "$s")
+  vs=$(version_slot "$s"); vo=$(version_slot "$o")
+  echo "Image compacte TL-SwitchOS ($(sed -n 's/^ARCH=//p' /etc/tlswitch-image))"
+  echo "  Disque          : /dev/$DISQUE ($(( $(cat /sys/block/$DISQUE/size) / 2048 )) Mo)"
+  echo "  Systeme demarre : $([ "$s" = 2 ] && echo A || echo B) - $vs"
+  echo "  Autre systeme   : $([ "$o" = 2 ] && echo A || echo B) - ${vo:-vide}"
+  echo "  Par defaut      : $([ "$(env_get actif)" = 3 ] && echo B || echo A)"
+  echo "  Donnees         : $(df -h --output=used,size $DATA | tail -1 | awk '{print $1" utilises sur "$2}')"
+}
+
+retour() {
+  init_disque
+  local s o vo; s=$(slot_demarre); o=$(autre_slot "$s"); vo=$(version_slot "$o")
+  [ -n "$vo" ] || die "l'autre systeme est vide : pas de retour possible"
+  env_set actif="$o" essai=
+  log "retour au systeme $vo (slot $o) demande"
+  echo "Le switch redemarrera sur $vo."
+}
+
+usine() {
+  init_disque
+  touch $DATA/reinitialiser && sync
+  log "retour a la configuration d'usine demande"
+  echo "Configuration d'usine au prochain demarrage."
+}
+
+# --- installation depuis le live CD ---
+# l'ISO contient le debut du disque (MBR, GRUB, TLSBOOT : socle.img.xz) et le systeme :
+# on ecrit le socle, le systeme dans le slot A, puis TLSDATA sur tout le reste du disque.
+choisir_disque() {   # choisir_disque <disque exclu> -> /dev/xxx
+  local n d r; declare -a L
+  {
+  echo; echo "  Disques disponibles :"; echo
+  n=0
+  for d in /sys/block/*; do
+    d=$(basename "$d")
+    case "$d" in loop*|ram*|zram*|sr*|fd*|dm-*|md*|"$1") continue ;; esac
+    [ "$(cat /sys/block/$d/size)" -gt 0 ] || continue
+    n=$((n+1)); L[$n]=$d
+    printf "   %d) /dev/%-10s %6s Mo  %s %s\n" $n "$d" $(( $(cat /sys/block/$d/size) / 2048 )) \
+      "$(cat /sys/block/$d/device/model 2>/dev/null | xargs)" \
+      "$([ "$(cat /sys/block/$d/removable 2>/dev/null)" = 1 ] && echo '(amovible)')"
+  done
+  [ $n -gt 0 ] || { echo "  Aucun disque trouve."; return 1; }
+  echo
+  } >&2
+  read -r -p "  Numero du disque ou installer TL-SwitchOS (Entree = annuler) : " r
+  [ -n "$r" ] && [ -n "${L[$r]:-}" ] || return 1
+  echo "/dev/${L[$r]}"
+}
+
+installer_live() {
+  local cible="${1:-}" L=/media/live/live med="" taille_c min p d r
+  local SOCLE_MO=0 SLOT_A_MO=0 SLOT_B_MO=0 DATA_DEBUT_MO=0
+  [ -f $L/socle.img.xz ] && [ -f $L/systeme.squashfs ] && [ -f $L/disque.conf ] \
+    || die "fichiers d'installation absents de $L"
+  # shellcheck disable=SC1090
+  . $L/disque.conf
+  min=$(( (DATA_DEBUT_MO + 64) * 2048 ))
+  # le CD ou la cle du live n'est pas propose
+  d=$(findmnt -n -o SOURCE /media/live 2>/dev/null | head -n 1)
+  case "$d" in /dev/*) med=$(basename "$d"); [ -e "/sys/class/block/$med/partition" ] && med=$(disque_de "$d") ;; esac
+  if [ -z "$cible" ]; then
+    echo; echo "  Installation de TL-SwitchOS $(sed -n 's/^VERSION=//p' /etc/tlswitch-image) (live : ${med:-en memoire})"
+    cible=$(choisir_disque "$med") || { echo "  Annule."; return 1; }
+  fi
+  [ -b "$cible" ] || die "$cible n'est pas un disque"
+  [ -z "$med" ] || [ "$(basename "$cible")" != "$med" ] || die "$cible est le CD / la cle du live"
+  taille_c=$(cat "/sys/block/$(basename "$cible")/size" 2>/dev/null) || die "$cible : donner le disque entier (ex : /dev/sda)"
+  [ "$taille_c" -ge "$min" ] || die "$cible trop petit ($((taille_c / 2048)) Mo, il faut $((min / 2048)) Mo)"
+  if [ -t 0 ] && [ -z "${TLS_OUI:-}" ]; then
+    echo; echo "  TOUT le contenu de $cible ($((taille_c / 2048)) Mo) va etre EFFACE."
+    read -r -p "  Tape EFFACER pour continuer : " r
+    [ "$r" = EFFACER ] || { echo "  Annule."; return 1; }
+  fi
+  for p in $(lsblk -lnpo NAME "$cible" | tail -n +2); do umount "$p" 2>/dev/null; done
+  log "installation live vers $cible"
+  echo "  Demarrage et TLSBOOT ($SOCLE_MO Mo)..."
+  xz -dc $L/socle.img.xz | dd of="$cible" bs=1M conv=fsync status=none || die "ecriture sur $cible impossible"
+  echo "  Systeme ($(( $(stat -c %s $L/systeme.squashfs) / 1048576 )) Mo)..."
+  dd if=$L/systeme.squashfs of="$cible" bs=1M seek="$SLOT_A_MO" conv=notrunc,fsync status=progress 2>&1 \
+    | tr '\r' '\n' | tail -n 1
+  # slot B vide (sinon un ancien systeme serait propose comme "systeme precedent")
+  dd if=/dev/zero of="$cible" bs=1M seek="$SLOT_B_MO" count=1 conv=notrunc,fsync status=none
+  # partition 4 = toute la fin du disque, identifiant de disque neuf
+  sfdisk --no-reread -q --delete "$cible" 4 >/dev/null 2>&1
+  echo "start=$((DATA_DEBUT_MO * 2048)), type=83" | sfdisk --no-reread -q -a "$cible" >/dev/null 2>&1 \
+    || die "partitionnement de $cible impossible"
+  sfdisk --disk-id "$cible" "0x$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')" >/dev/null 2>&1
+  partx -u "$cible" 2>/dev/null || blockdev --rereadpt "$cible" 2>/dev/null; udevadm settle
+  p=$(partition "$(basename "$cible")" 4) || die "partition 4 de $cible introuvable"
+  mkfs.ext4 -q -F -L TLSDATA "$p" || die "formatage de $p impossible"
+  # la configuration faite en live suit (meme machine : memes ports)
+  d=$(mktemp -d); mount "$p" "$d"
+  local conf=0
+  if [ -s /etc/tlswitch/ports ] && [ -f /etc/tlswitch/startup.conf ]; then
+    echo "  Copie de la configuration du live..."
+    cp -a $DATA/upper "$d/" 2>/dev/null && conf=1
+    rm -rf "$d"/upper/var/log/* "$d"/upper/tmp/* "$d"/upper/var/tmp/* "$d"/upper/run 2>/dev/null
+  fi
+  cp -a $DATA/image "$d/" 2>/dev/null
+  umount "$d"
+  # sans configuration du live : les reglages du CD (nom, IP...) servent au premier demarrage
+  if [ $conf = 0 ] && [ -f /media/live/tlswitch.env ]; then
+    p=$(partition "$(basename "$cible")" 1) && mount -t vfat "$p" "$d" \
+      && { cp /media/live/tlswitch.env "$d/tlswitch.env"; sync; umount "$d"; }
+  fi
+  rmdir "$d"; sync
+  log "installation terminee sur $cible"
+  echo; echo "  TL-SwitchOS est installe sur $cible. Retire le CD ou la cle et redemarre."
+}
+
+# --- copie sur un disque interne ---
+copier() {
+  if live; then installer_live "$@"; return; fi
+  init_disque
+  local cible="${1:-}" src="/dev/$DISQUE" fin3 taille_c min n p d r
+  fin3=$(( $(cat "/sys/class/block/$(basename "$(partition "$DISQUE" 3)")/start") + \
+           $(cat "/sys/class/block/$(basename "$(partition "$DISQUE" 3)")/size") ))
+  min=$(( fin3 + 131072 ))              # + 64 Mo pour TLSDATA
+  if [ -z "$cible" ]; then
+    echo; echo "  Disques disponibles (le disque de demarrage $src n'est pas propose) :"; echo
+    n=0; declare -a L
+    for d in /sys/block/*; do
+      d=$(basename "$d")
+      case "$d" in loop*|ram*|zram*|sr*|fd*|dm-*|md*|"$DISQUE") continue ;; esac
+      [ "$(cat /sys/block/$d/size)" -gt 0 ] || continue
+      n=$((n+1)); L[$n]=$d
+      printf "   %d) /dev/%-10s %6s Mo  %s %s\n" $n "$d" $(( $(cat /sys/block/$d/size) / 2048 )) \
+        "$(cat /sys/block/$d/device/model 2>/dev/null | xargs)" \
+        "$([ "$(cat /sys/block/$d/removable 2>/dev/null)" = 1 ] && echo '(amovible)')"
+    done
+    [ $n -gt 0 ] || die "aucun autre disque"
+    echo; read -r -p "  Numero du disque ou installer TL-SwitchOS (Entree = annuler) : " r
+    [ -n "$r" ] && [ -n "${L[$r]:-}" ] || { echo "  Annule."; return 1; }
+    cible=/dev/${L[$r]}
+  fi
+  [ -b "$cible" ] || die "$cible n'est pas un disque"
+  [ "$(basename "$cible")" != "$DISQUE" ] || die "c'est le disque de demarrage"
+  taille_c=$(cat "/sys/block/$(basename "$cible")/size")
+  [ "$taille_c" -ge "$min" ] || die "$cible trop petit ($((taille_c / 2048)) Mo, il faut $((min / 2048)) Mo)"
+  if [ -t 0 ] && [ -z "${TLS_OUI:-}" ]; then
+    echo; echo "  TOUT le contenu de $cible ($((taille_c / 2048)) Mo) va etre EFFACE."
+    read -r -p "  Tape EFFACER pour continuer : " r
+    [ "$r" = EFFACER ] || { echo "  Annule."; return 1; }
+  fi
+  for p in $(lsblk -lnpo NAME "$cible" | tail -n +2); do umount "$p" 2>/dev/null; done
+  log "copie de $src vers $cible"
+  echo "  Copie du systeme ($((fin3 / 2048)) Mo)..."
+  dd if="$src" of="$cible" bs=1M count=$(( (fin3 + 2047) / 2048 )) conv=fsync status=progress 2>&1 | tr '\r' '\n' | tail -n 1
+  # partition 4 = toute la fin du disque, identifiant de disque neuf
+  sfdisk --no-reread -q --delete "$cible" 4 >/dev/null 2>&1
+  echo "start=$fin3, type=83" | sfdisk --no-reread -q -a "$cible" >/dev/null 2>&1 || die "partitionnement de $cible impossible"
+  sfdisk --disk-id "$cible" "0x$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')" >/dev/null 2>&1
+  partx -u "$cible" 2>/dev/null || blockdev --rereadpt "$cible" 2>/dev/null; udevadm settle
+  p=$(partition "$(basename "$cible")" 4) || die "partition 4 de $cible introuvable"
+  mkfs.ext4 -q -F -L TLSDATA "$p" || die "formatage de $p impossible"
+  # la configuration faite sur la cle suit (meme machine : memes ports)
+  d=$(mktemp -d); mount "$p" "$d"
+  echo "  Copie de la configuration..."
+  cp -a $DATA/upper "$d/" 2>/dev/null; cp -a $DATA/image "$d/" 2>/dev/null
+  umount "$d"
+  p=$(partition "$(basename "$cible")" 1); mount -t vfat "$p" "$d"
+  grub-editenv "$d/boot/grub/grubenv" set actif="$(slot_demarre)" essai= ; sync; umount "$d"; rmdir "$d"
+  log "copie terminee sur $cible"
+  echo; echo "  TL-SwitchOS est installe sur $cible. Retire la cle et redemarre."
+}
+
+case "${1:-etat}" in
+  etat) etat ;;
+  demarrage) demarrage ;;
+  confirmer) confirmer ;;
+  retour) retour ;;
+  usine) usine ;;
+  agrandir) agrandir ;;
+  copier) shift; copier "${1:-}" ;;
+  monter-boot) monter_boot ;;
+  *) sed -n '2,20p' "$0"; exit 1 ;;
+esac

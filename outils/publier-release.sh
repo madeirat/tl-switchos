@@ -31,11 +31,14 @@ TAG="v$VERSION"
 # telechargements : seulement la derniere ISO (les anciennes versions restent dans le depot APT
 # et les Releases). L'ancienne ISO n'est retiree que 30 min apres l'arrivee de la nouvelle :
 # le serveur web reprend le site toutes les 10 min, son lien ne doit jamais tomber sur une 404.
+# Meme regle pour l'image compacte et le live CD (ajoutes par l'etape root de la release).
 purger_iso() {
-  local T="$WWW/telechargements" N
-  N=$(ls "$T"/TL-SwitchOS-*-amd64.iso 2>/dev/null | sort -V | tail -n 1)
-  [ -n "$N" ] && [ -n "$(find "$N" -mmin +30)" ] || return 0
-  ls "$T"/TL-SwitchOS-*-amd64.iso | sort -V | head -n -1 | while read -r v; do rm -f "$v" "$v.sha256"; log "ISO retiree : ${v##*/}"; done
+  local T="$WWW/telechargements" N s
+  for s in amd64.iso amd64.img.xz amd64-live.iso; do
+    N=$(ls "$T"/TL-SwitchOS-[0-9]*-$s 2>/dev/null | sort -V | tail -n 1)
+    [ -n "$N" ] && [ -n "$(find "$N" -mmin +30)" ] || continue
+    ls "$T"/TL-SwitchOS-[0-9]*-$s | sort -V | head -n -1 | while read -r v; do rm -f "$v" "$v.sha256"; log "fichier retire : ${v##*/}"; done
+  done
 }
 site() {
   local S="$CACHE/site" A="$WWW/site/site.tar.gz" FP

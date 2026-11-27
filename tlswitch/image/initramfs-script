@@ -1,0 +1,132 @@
+# TL-SwitchOS (image compacte) - montage du systeme dans l'initramfs
+# Installe en /etc/initramfs-tools/scripts/tlswitch, utilise avec boot=tlswitch.
+#
+#   tlsdata=<PARTUUID de la partition TLSDATA>  (donne par GRUB : identifiant du disque-04)
+#   tlsslot=2|3                                (partition du systeme a demarrer)
+#   tlsreset                                   (retour a la configuration d'usine)
+#   tlslive [tlsram]                           systeme live (CD / cle USB de l'ISO) : la
+#                                              configuration reste en memoire ; tlsram
+#                                              copie le systeme en memoire (cle retirable)
+#
+# Disque : p1 TLSBOOT (FAT, GRUB), p2 et p3 systemes A et B (squashfs, lecture
+# seule), p4 TLSDATA (ext4) : couche modifiable (overlay) + donnees du switch.
+# Le systeme lui-meme n'est jamais modifie : une mise a jour ecrit l'autre slot.
+
+tls_param() { for a in $(cat /proc/cmdline); do case "$a" in "$1="*) echo "${a#*=}"; return;; "$1") echo 1; return;; esac; done; }
+
+# fichiers gardes quand le systeme change (nouvelle image) : tout le reste de la
+# couche modifiable est remis a zero pour ne pas masquer les fichiers neufs
+TLS_GARDER="etc/tlswitch etc/hostname etc/ssh/ssh_host_ecdsa_key etc/ssh/ssh_host_ecdsa_key.pub \
+etc/ssh/ssh_host_ed25519_key etc/ssh/ssh_host_ed25519_key.pub etc/ssh/ssh_host_rsa_key \
+etc/ssh/ssh_host_rsa_key.pub etc/systemd/network etc/machine-id var/lib/tlswitch \
+var/lib/systemd/random-seed home root"
+
+tls_panne() {
+	echo "TL-SwitchOS : $*"
+	panic "TL-SwitchOS : $*"
+}
+
+# --- live : ISO (volume TLSLIVE), systeme squashfs en lecture seule, couche en memoire ---
+tls_live() {
+	local i n med src loop
+	modprobe -q squashfs; modprobe -q overlay; modprobe -q isofs; modprobe -q loop
+	modprobe -q sr_mod; modprobe -q usb-storage; modprobe -q uas
+	[ "$quiet" != y ] && log_begin_msg "TL-SwitchOS live : recherche du CD ou de la cle"
+	mkdir -p /tls/live /tls/data
+	i=0; med=""
+	while [ $i -lt 300 ]; do
+		for med in /dev/disk/by-label/TLSLIVE /dev/sr0 /dev/sr1; do
+			[ -b "$med" ] || continue
+			mount -t iso9660 -o ro "$med" /tls/live 2>/dev/null || continue
+			[ -f /tls/live/live/systeme.squashfs ] && break 2
+			umount /tls/live
+		done
+		med=""; sleep 0.1; i=$((i+1))
+		[ $((i % 50)) = 0 ] && udevadm trigger --action=add >/dev/null 2>&1
+	done
+	[ -n "$med" ] || tls_panne "CD ou cle TL-SwitchOS (TLSLIVE) introuvable"
+	[ "$quiet" != y ] && log_end_msg
+	mount -t tmpfs -o mode=0755,size=60% tmpfs /tls/data || tls_panne "memoire insuffisante"
+	src=/tls/live/live
+	if [ -n "$(tls_param tlsram)" ]; then
+		echo "TL-SwitchOS live : copie du systeme en memoire"
+		mkdir -p /tls/data/live
+		cp /tls/live/live/systeme.squashfs /tls/live/live/socle.img.xz /tls/live/live/disque.conf /tls/data/live/ \
+			|| tls_panne "memoire insuffisante pour tlsram"
+		cp /tls/live/tlswitch.env /tls/data/ 2>/dev/null
+		umount /tls/live
+		mount --bind /tls/data /tls/live
+		src=/tls/data/live
+	fi
+	loop=$(losetup -f --show -r "$src/systeme.squashfs") || tls_panne "losetup impossible"
+	mkdir -p /tls/systeme
+	mount -t squashfs -o ro "$loop" /tls/systeme || tls_panne "systeme illisible ($loop)"
+	mkdir -p /tls/data/upper /tls/data/work
+	sed -n 's/^IMAGE=//p' /tls/systeme/etc/tlswitch-image > /tls/data/image
+	mount -t overlay overlay -o "lowerdir=/tls/systeme,upperdir=/tls/data/upper,workdir=/tls/data/work" "${rootmnt}" \
+		|| tls_panne "overlay impossible"
+	mkdir -p "${rootmnt}/run/tlswitch-image"
+	for n in live data systeme; do
+		mkdir -p "${rootmnt}/media/$n" 2>/dev/null
+		mount --move "/tls/$n" "${rootmnt}/media/$n" || mount -o bind "/tls/$n" "${rootmnt}/media/$n"
+	done
+}
+
+mountroot() {
+	local uuid slot data dev disk sys p n i v ancienne
+	if [ -n "$(tls_param tlslive)" ]; then tls_live; return; fi
+	uuid=$(tls_param tlsdata); slot=$(tls_param tlsslot)
+	[ -n "$uuid" ] && [ -n "$slot" ] || tls_panne "tlsdata ou tlsslot absent de la ligne de commande"
+	modprobe -q squashfs; modprobe -q overlay; modprobe -q ext4; modprobe -q loop
+	[ "$quiet" != y ] && log_begin_msg "TL-SwitchOS : recherche du disque"
+	i=0
+	while [ ! -e "/dev/disk/by-partuuid/$uuid" ] && [ $i -lt 300 ]; do
+		sleep 0.1; i=$((i+1))
+		[ $((i % 50)) = 0 ] && udevadm trigger --action=add >/dev/null 2>&1
+	done
+	[ -e "/dev/disk/by-partuuid/$uuid" ] || tls_panne "partition de donnees $uuid introuvable"
+	data=$(readlink -f "/dev/disk/by-partuuid/$uuid")
+	dev=$(basename "$data")
+	disk=$(basename "$(readlink -f "/sys/class/block/$dev/..")")
+	sys=""
+	for p in /sys/block/"$disk"/"$disk"*; do
+		[ -f "$p/partition" ] && [ "$(cat "$p/partition")" = "$slot" ] && sys=/dev/$(basename "$p")
+	done
+	[ -n "$sys" ] && [ -b "$sys" ] || tls_panne "systeme (partition $slot de $disk) introuvable"
+	[ "$quiet" != y ] && log_end_msg
+
+	mkdir -p /tls/data /tls/systeme
+	# la partition de donnees est verifiee a chaque demarrage (coupure de courant)
+	[ -x /sbin/e2fsck ] && /sbin/e2fsck -p "$data" >/dev/null 2>&1
+	mount -t ext4 -o noatime "$data" /tls/data || tls_panne "montage de $data impossible"
+	mount -t squashfs -o ro "$sys" /tls/systeme || tls_panne "systeme illisible sur $sys"
+
+	v=$(cat /tls/systeme/etc/tlswitch-image 2>/dev/null | sed -n 's/^IMAGE=//p')
+	ancienne=$(cat /tls/data/image 2>/dev/null)
+	if [ -n "$(tls_param tlsreset)" ] || [ -e /tls/data/reinitialiser ]; then
+		echo "TL-SwitchOS : retour a la configuration d'usine"
+		rm -rf /tls/data/upper /tls/data/work /tls/data/upper.ancienne /tls/data/reinitialiser
+	elif [ -d /tls/data/upper ] && [ "$ancienne" != "$v" ]; then
+		# nouvelle image : on repart d'une couche propre, en gardant la config du switch
+		echo "TL-SwitchOS : nouvelle image ($ancienne -> $v), configuration conservee"
+		rm -rf /tls/data/upper.ancienne /tls/data/work
+		mv /tls/data/upper /tls/data/upper.ancienne
+		mkdir -p /tls/data/upper
+		for p in $TLS_GARDER; do
+			[ -e "/tls/data/upper.ancienne/$p" ] || continue
+			mkdir -p "/tls/data/upper/$(dirname "$p")"
+			cp -a "/tls/data/upper.ancienne/$p" "/tls/data/upper/$(dirname "$p")/"
+		done
+		# l'ancienne couche reste pour un retour arriere eventuel (slot precedent)
+	fi
+	mkdir -p /tls/data/upper /tls/data/work
+	echo "$v" > /tls/data/image
+	mount -t overlay overlay -o "lowerdir=/tls/systeme,upperdir=/tls/data/upper,workdir=/tls/data/work" "${rootmnt}" \
+		|| tls_panne "overlay impossible"
+	mkdir -p "${rootmnt}/run/tlswitch-image"
+	echo "$slot" > /tls/data/slot-demarre
+	for n in data systeme; do
+		mkdir -p "${rootmnt}/media/$n" 2>/dev/null
+		mount --move "/tls/$n" "${rootmnt}/media/$n" || mount -o bind "/tls/$n" "${rootmnt}/media/$n"
+	done
+}

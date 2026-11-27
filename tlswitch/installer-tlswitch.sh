@@ -16,9 +16,15 @@
 #     TLS_GW=192.168.1.1            passerelle
 #     TLS_MGMT_VLAN=99              VLAN de l'IP de gestion  (defaut : 1)
 #     TLS_MGMT=none                 port de gestion dedie : none | last | nom d'interface (defaut : none)
+#     TLS_UPLINK=eno1               port relie au reseau qui recoit le VLAN de gestion TAGUE :
+#                                   il devient un trunk (defaut : detecte, si la machine sort
+#                                   deja par une interface VLAN, ex. eno1.250 de l'installateur)
 #     TLS_SERIAL=ttyS0 TLS_BAUD=115200   console serie
 #     TLS_DNS=192.168.1.1           serveur DNS (defaut : celui de la machine)
 #     TLS_VERBOSE=1                 affiche toute la sortie d'apt
+#     TLS_ETAPES="1 2 6 7 8 9"      etapes a faire (defaut : toutes). Image compacte :
+#                                   construction sans les ports (3 4 5), qui sont faits
+#                                   au premier demarrage de la machine (3 4 5 9)
 # =============================================================================
 set -euo pipefail
 SRC="$(cd "$(dirname "$0")" && pwd)"
@@ -32,12 +38,54 @@ MGMT="${TLS_MGMT:-none}"
 
 say() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[1;31mERREUR : %s\033[0m\n' "$*" >&2; exit 1; }
+ETAPES=" ${TLS_ETAPES:-1 2 3 4 5 6 7 8 9} "
+etape() { case "$ETAPES" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+# image compacte : systeme en lecture seule (squashfs) + couche modifiable sur une petite partition
+COMPACT=0; [ -f /etc/tlswitch-image ] && COMPACT=1
 
 [ "$(id -u)" = 0 ] || die "lance ce script en root"
 [ -f "$SRC/tlswitch.py" ] || die "tlswitch.py introuvable a cote du script"
 grep -qiE 'debian' /etc/os-release || die "Debian requis (12 ou 13)"
 
+# --- depots Debian : Debian installee "sans miroir" (reseau absent pendant l'installation) ---
+# seule la ligne du CD/de la cle est alors presente : apt ne trouve rien et echoue
+depots_debian() {
+  local c f
+  # lignes "deb cdrom:" : le CD n'est plus la, apt-get update echouerait
+  for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+    [ -f "$f" ] && grep -q '^deb cdrom:' "$f" && sed -i 's/^deb cdrom:/# (CD retire par TL-SwitchOS) deb cdrom:/' "$f"
+  done
+  for f in /etc/apt/sources.list.d/*.sources; do
+    [ -f "$f" ] && grep -q '^URIs: *cdrom:' "$f" && mv "$f" "$f.cdrom-desactive"
+  done
+  if ! grep -qsE '^deb +(\[[^]]*\] +)?https?://[^ ]*debian' /etc/apt/sources.list /etc/apt/sources.list.d/*.list && \
+     ! grep -qsE '^URIs:.*https?://[^ ]*debian' /etc/apt/sources.list.d/*.sources; then
+    c=$(sed -n 's/^VERSION_CODENAME=//p' /etc/os-release); c=${c:-trixie}
+    echo "   depots Debian absents (installation sans miroir) : deb.debian.org ($c) ajoute"
+    cat >> /etc/apt/sources.list <<EOA
+# ajoute par TL-SwitchOS (installation de Debian faite sans miroir)
+deb http://deb.debian.org/debian $c main non-free-firmware
+deb http://deb.debian.org/debian $c-updates main non-free-firmware
+deb http://security.debian.org/debian-security $c-security main non-free-firmware
+EOA
+  fi
+  return 0
+}
+# acces Internet : un message clair plutot qu'une erreur d'apt
+verifier_internet() {
+  if ! ip -4 route show default 2>/dev/null | grep -q .; then
+    echo "   PAS de route par defaut : la machine n'a pas d'adresse sur un reseau routeur (DHCP ? VLAN ?)"
+    return 1
+  fi
+  if ! getent hosts deb.debian.org >/dev/null 2>&1; then
+    echo "   le DNS ne repond pas (deb.debian.org) : verifie /etc/resolv.conf ($(awk '/^nameserver/{printf "%s ",$2}' /etc/resolv.conf 2>/dev/null))"
+    return 1
+  fi
+  return 0
+}
+
 # -----------------------------------------------------------------------------
+if etape 1; then
 say "1/9 Paquets"
 export DEBIAN_FRONTEND=noninteractive
 # TLS_VERBOSE=1 : on montre la sortie d'apt (installation depuis l'ISO)
@@ -56,6 +104,8 @@ if [ -z "$MC$MO" ]; then
   echo "   tous les paquets sont deja installes (installateur Debian) : rien a telecharger"
 else
   echo "   a installer :$MC$MO"
+  depots_debian
+  verifier_internet || true
   apt-get update $Q $APT_OPTS >$OUT 2>&1 || echo "   (mise a jour de la liste des paquets impossible : pas d'Internet ?)"
   echo "iperf3 iperf3/start_daemon boolean false" | debconf-set-selections 2>/dev/null || true
   if [ -n "$MC" ]; then
@@ -78,17 +128,22 @@ command -v dhclient >/dev/null || command -v dhcpcd >/dev/null || \
 systemctl disable --now snmpd >/dev/null 2>&1 || true
 # NetworkManager / ifupdown ne doivent pas toucher aux ports du switch
 systemctl disable --now NetworkManager >/dev/null 2>&1 || true
+fi
 
 # -----------------------------------------------------------------------------
+if etape 2; then
 say "2/9 Logiciel TL-SwitchOS"
 install -d -m 755 $LIB $LIB/web
 install -m 755 "$SRC/tlswitch.py" $LIB/tlswitch.py
 install -m 644 "$SRC/tlswitch_web.py" $LIB/tlswitch_web.py
+[ -f "$SRC/tlswitch_central.py" ] && install -m 644 "$SRC/tlswitch_central.py" $LIB/tlswitch_central.py
 cp -r "$SRC/web/." $LIB/web/
 # tout le dossier est garde : il sert de base aux mises a jour et au retour arriere
 for f in depot-apt.conf depot-apt.gpg maj-publique.pem; do [ -f "$SRC/$f" ] && install -m 644 "$SRC/$f" $LIB/; done
 for f in maj.sh marque.sh installer-tlswitch.sh premier-demarrage.sh; do [ -f "$SRC/$f" ] && install -m 755 "$SRC/$f" $LIB/; done
 [ -d "$SRC/boot" ] && { install -d $LIB/boot; cp -r "$SRC/boot/." $LIB/boot/; }
+# image compacte : demarrage, systemes A/B, premier demarrage (installes par maj.sh)
+[ -d "$SRC/image" ] && { install -d $LIB/image; cp -r "$SRC/image/." $LIB/image/; }
 install -d -m 755 /var/lib/tlswitch/maj
 # cle publique : seules les mises a jour signees par TA cle seront acceptees
 if [ -f "$SRC/maj-publique.pem" ]; then install -d -m 700 $ETC; install -m 644 "$SRC/maj-publique.pem" $ETC/maj.pub; echo "   mises a jour : signature exigee"; fi
@@ -109,8 +164,10 @@ Defaults:%tlswitch env_keep += "SSH_CONNECTION"
 EOF
 chmod 440 /etc/sudoers.d/tlswitch
 visudo -cf /etc/sudoers.d/tlswitch >/dev/null || die "sudoers invalide"
+fi
 
 # -----------------------------------------------------------------------------
+if etape 3; then
 say "3/9 Ports reseau"
 mapfile -t NICS < <(for d in /sys/class/net/*; do
   n=$(basename "$d")
@@ -152,6 +209,29 @@ CUR_IP=""
 CUR_GW=$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}' || true)
 IP="${TLS_IP:-$CUR_IP}"; GW="${TLS_GW:-$CUR_GW}"
 if [ "$IP" = dhcp ]; then IP=""; GW=""; fi
+# port d'arrivee du VLAN de gestion TAGUE (trunk) : donne (TLS_UPLINK) ou detecte quand la
+# machine sort deja par une interface VLAN (ex. eno1.250, configuree par l'installateur Debian)
+UPLINK_PORT=""; UP_IF="${TLS_UPLINK:-}"
+if [ -z "$UP_IF" ] && [ -n "$CUR_IF" ] && [ "$MGMT_VLAN" != 1 ] && \
+   ip -d link show dev "$CUR_IF" 2>/dev/null | grep -q "vlan protocol 802.1Q id $MGMT_VLAN "; then
+  UP_IF=$(ip -o link show dev "$CUR_IF" | sed -n 's/^[0-9]*: [^@]*@\([^:]*\):.*/\1/p')
+fi
+if [ -n "$UP_IF" ] && [ "$MGMT_VLAN" != 1 ]; then
+  UP_MAC=$(cat "/sys/class/net/$UP_IF/address" 2>/dev/null || true)
+  [ -z "$UP_MAC" ] && printf '%s' "$UP_IF" | grep -qiE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' && UP_MAC="$UP_IF"
+  j=0
+  for entry in "${NICS[@]}"; do
+    cur=${entry% *}; mac=${entry#* }
+    [ -n "$MGMT_IF" ] && [ "$cur" = "$MGMT_IF" ] && continue
+    j=$((j+1))
+    if [ "$cur" = "$UP_IF" ] || [ "${mac,,}" = "${UP_MAC,,}" ]; then UPLINK_PORT=$j; fi
+  done
+  if [ -n "$UPLINK_PORT" ]; then
+    echo "   Gi1/0/$UPLINK_PORT ($UP_IF) : trunk, VLAN $MGMT_VLAN tague (arrivee de la gestion)"
+  else
+    echo "   port $UP_IF introuvable parmi les ports : pas de trunk de gestion"
+  fi
+fi
 # adresse illisible (ex. "/24") : DHCP plutot qu'un Vlan de gestion sans adresse
 if [ -n "$IP" ] && ! printf '%s' "$IP" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$'; then
   echo "   adresse de gestion '$IP' invalide : DHCP a la place"; IP=""; GW=""
@@ -183,8 +263,10 @@ EOF
   systemctl enable systemd-networkd >/dev/null 2>&1 || true
   echo "   port de gestion dedie : mgmt0 (DHCP + 192.168.254.254/24)"
 fi
+fi
 
 # -----------------------------------------------------------------------------
+if etape 4; then
 say "4/9 Configuration initiale"
 if [ ! -f $ETC/startup.conf ]; then
   TEMP=0
@@ -204,6 +286,11 @@ if [ ! -f $ETC/startup.conf ]; then
     echo "spanning-tree mode rstp"
     echo "lldp run"
     for p in $(seq 1 $NPORTS); do
+      if [ "$p" = "${UPLINK_PORT:-}" ]; then
+        # arrivee du reseau : le VLAN de gestion y est tague (comme pendant l'installation)
+        printf 'interface GigabitEthernet1/0/%s\n description Uplink gestion\n switchport mode trunk\n switchport trunk allowed vlan %s\n' "$p" "$MGMT_VLAN"
+        continue
+      fi
       printf 'interface GigabitEthernet1/0/%s\n switchport mode access\n' "$p"
       if [ "$MGMT_VLAN" != 1 ]; then printf ' switchport access vlan %s\n' "$MGMT_VLAN"; fi
     done
@@ -224,19 +311,23 @@ if [ ! -f $ETC/startup.conf ]; then
 else
   echo "   startup-config existante conservee"
 fi
+fi
 
 # -----------------------------------------------------------------------------
+if etape 5; then
 say "5/9 Certificat HTTPS"
 # (certificat moderne : SAN, usages ; refait par maj.sh s'il est d'un ancien modele)
 if [ ! -f $ETC/web.crt ]; then
-  openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=$HOSTNAME_NEW/O=TECH-LINUX" \
+  openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=$HOSTNAME_NEW/O=TL-SwitchOS" \
     -addext "subjectAltName=DNS:$HOSTNAME_NEW,DNS:$HOSTNAME_NEW.local" \
     -addext "basicConstraints=critical,CA:FALSE" -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
     -addext "extendedKeyUsage=serverAuth" -keyout $ETC/web.key -out $ETC/web.crt 2>/dev/null
   chmod 600 $ETC/web.key
 fi
+fi
 
 # -----------------------------------------------------------------------------
+if etape 6; then
 say "6/9 Services"
 cat > /etc/systemd/system/tlswitch.service <<'EOF'
 [Unit]
@@ -315,8 +406,10 @@ if [ -f /etc/apt/sources.list.d/tlswitch.sources ]; then
     echo "   depot TL-SwitchOS : pas encore joignable (sera fait par 'install update')"
   fi
 fi
+fi
 
 # -----------------------------------------------------------------------------
+if etape 7; then
 say "7/9 Fiabilite et performances (noyau)"
 cat > /etc/sysctl.d/90-tlswitch.conf <<'EOF'
 # TL-SwitchOS
@@ -340,9 +433,12 @@ install -d /etc/systemd/system.conf.d
 printf '[Manager]\nRuntimeWatchdogSec=30s\nRebootWatchdogSec=3min\n' > /etc/systemd/system.conf.d/tlswitch-watchdog.conf
 # journal persistant mais borne
 install -d /etc/systemd/journald.conf.d
-printf '[Journal]\nStorage=persistent\nSystemMaxUse=100M\n' > /etc/systemd/journald.conf.d/tlswitch.conf
+if [ "$COMPACT" = 1 ]; then J=16M; else J=100M; fi
+printf '[Journal]\nStorage=persistent\nSystemMaxUse=%s\n' "$J" > /etc/systemd/journald.conf.d/tlswitch.conf
+fi
 
 # -----------------------------------------------------------------------------
+if etape 8; then
 say "8/9 Console serie ($SERIAL, $BAUD bauds)"
 if [ -f /etc/default/grub ]; then
   sed -i -E '/^GRUB_(TERMINAL|TERMINAL_INPUT|TERMINAL_OUTPUT|SERIAL_COMMAND|TIMEOUT|THEME|GFXMODE|DISTRIBUTOR|BACKGROUND)=/d' /etc/default/grub
@@ -376,22 +472,24 @@ fi
 systemctl enable serial-getty@$SERIAL.service >/dev/null 2>&1 || true
 # les .link de renommage doivent etre presents des l'initramfs
 update-initramfs -u >/dev/null 2>&1 || true
+fi
 
 # -----------------------------------------------------------------------------
+if etape 9; then
 say "9/9 Compte admin"
 id admin >/dev/null 2>&1 || useradd -m -s /usr/local/bin/tlsh -G tlswitch admin
 usermod -s /usr/local/bin/tlsh -aG tlswitch admin
 # mot de passe pose tout de suite (sans attendre le 1er demarrage) : la connexion
 # admin/admin marche meme si l'application de la configuration echoue
-H=$(sed -n 's/^username admin privilege [0-9]* secret 5 \(\S*\).*/\1/p' $ETC/startup.conf 2>/dev/null | head -n 1)
+H=""; [ -f $ETC/startup.conf ] && H=$(sed -n 's/^username admin privilege [0-9]* secret 5 \(\S*\).*/\1/p' $ETC/startup.conf 2>/dev/null | head -n 1)
 [ -n "$H" ] && echo "admin:$H" | chpasswd -e
 ADMIN_OK=0
 if grep -q '^admin:[$]' /etc/shadow; then echo "   mot de passe admin en place"; ADMIN_OK=1
-else echo "   ATTENTION : mot de passe admin non pose (root reste deverrouille)"; fi
+elif [ -f $ETC/startup.conf ]; then echo "   ATTENTION : mot de passe admin non pose (root reste deverrouille)"; fi
 echo "$HOSTNAME_NEW" > /etc/hostname
 if [ "${TLS_LOCK_ROOT:-0}" = 1 ] && [ "${ADMIN_OK:-0}" = 1 ]; then passwd -l root >/dev/null; echo "   root verrouille (secours : start-shell depuis la CLI niveau 15)"; fi
 
-cat <<EOF
+if etape 3; then cat <<EOF
 
 =====================================================================
  TL-SwitchOS installe. Redemarre maintenant :   reboot
@@ -405,3 +503,6 @@ cat <<EOF
  Secours    : start-shell depuis la CLI niveau 15 (root interdit en SSH)
 =====================================================================
 EOF
+fi
+fi
+

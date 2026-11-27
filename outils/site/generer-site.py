@@ -95,7 +95,13 @@ def telechargements(dossier):
                 sha = open(p + ".sha256").read().split()[0]
             except (OSError, IndexError):
                 pass
-            isos.append({"version": m.group(1), "fichier": f, "taille": os.path.getsize(p),
+            # image compacte et live CD de la meme version (petites machines), s'ils sont la
+            compact = []
+            for suffixe, nom in (("amd64.img.xz", "image compacte"), ("amd64-live.iso", "live CD")):
+                c = "TL-SwitchOS-%s-%s" % (m.group(1), suffixe)
+                if os.path.isfile(os.path.join(dossier, c)):
+                    compact.append({"nom": nom, "fichier": c, "taille": os.path.getsize(os.path.join(dossier, c))})
+            isos.append({"version": m.group(1), "fichier": f, "taille": os.path.getsize(p), "compact": compact,
                          "sha": sha, "date": time.strftime("%d/%m/%Y", time.localtime(os.path.getmtime(p)))})
     isos.sort(key=lambda i: cle_version(i["version"]), reverse=True)
     return isos
@@ -233,6 +239,11 @@ def page(version, isos, versions, depot_url, captures, genere, github=""):
         hero_btn = '<span class="btn desactive">ISO bientôt disponible</span>'
         carte_dl = ('<div class="dl-carte"><div><p class="dl-titre">TL-SwitchOS {v}</p>'
                     '<p class="muet">L\'image ISO arrive bientôt.</p></div></div>').format(v=e(version))
+    if der and der.get("compact"):
+        carte_dl += ('<p class="muet centre">Petites machines (512 Mo de RAM, disque de 1 Go) : %s · '
+                     '<a href="installation.html#petites-machines">mode d\'emploi</a></p>'
+                     % " · ".join('<a href="%s%s" download>%s</a> (%s)' % (e(dl), e(c["fichier"]), c["nom"], taille(c["taille"]))
+                                  for c in der["compact"]))
     plus = ('<p class="muet centre">Quoi de neuf : <a href="notes-de-version.html">notes de version</a>%s</p>'
             % (' · versions précédentes : <a href="%s/releases">GitHub</a>' % e(gh) if gh else ""))
 
@@ -289,7 +300,7 @@ VLAN Name        Status    Ports
     <li><span>2</span><h3>Démarrer</h3><p>Sur la clé, puis répondre à deux questions.</p></li>
     <li><span>3</span><h3>Administrer</h3><p>En CLI ou depuis le navigateur.</p></li>
   </ol>
-  <p class="muet centre">PC x86_64 · 2 ports Ethernet minimum · 2 Go de RAM · 10 Go de disque</p>
+  <p class="muet centre">PC x86_64 · 2 ports Ethernet minimum · 2 Go de RAM · 10 Go de disque<br>Image compacte : 512 Mo de RAM et 1 Go de disque suffisent</p>
   <p class="suite"><a href="installation.html">Guide d'installation →</a></p>
 </section>
 
@@ -369,6 +380,7 @@ def page_installation(version, github, depot_url=""):
 <li>PC x86_64 (BIOS ou UEFI) avec au moins 2 ports Ethernet, 2 Go de RAM et 10 Go de disque.</li>
 <li>En machine virtuelle : une carte réseau virtuelle par port du switch.</li>
 <li>Une connexion Internet sur un des ports pendant l'installation (paquets Debian).</li>
+<li>Petite machine (mini PC, client léger, boîtier à carte CF ou SATA DOM) : 512 Mo de RAM et 1 Go de disque avec l'<a href="#petites-machines">image compacte</a>.</li>
 </ul>
 
 <h2>Vérifier l'image</h2>
@@ -385,6 +397,16 @@ def page_installation(version, github, depot_url=""):
 <li>L'installateur demande quel disque utiliser et comment le partitionner (guidé ou manuel). Rien n'est effacé sans confirmation.</li>
 <li>TL-SwitchOS s'installe, puis la machine redémarre.</li>
 </ol>
+
+<h2 id="petites-machines">Petites machines : image compacte et live CD</h2>
+<p>L'<strong>image compacte</strong> (<code>TL-SwitchOS-{v}-amd64.img.xz</code>) tient sur un disque de 1 Go et tourne avec 512 Mo de RAM. Le système est en lecture seule : une coupure de courant ne peut pas l'abîmer.</p>
+<ol>
+<li>Écris l'image sur la clé, la carte CF ou le SATA DOM avec balenaEtcher, Rufus (mode DD) ou <code>xzcat TL-SwitchOS-{v}-amd64.img.xz | dd of=/dev/sdX bs=4M conv=fsync</code>.</li>
+<li>Facultatif : règle le nom, le VLAN et l'IP dans <code>tlswitch.env</code>, sur la partition <code>TLSBOOT</code> lisible depuis Windows.</li>
+<li>Démarre. Aucune question : ports détectés, IP en DHCP, <code>admin</code> / <code>admin</code>.</li>
+</ol>
+<p>Le <strong>live CD</strong> (<code>TL-SwitchOS-{v}-amd64-live.iso</code>) démarre TL-SwitchOS sans rien écrire sur la machine, pour l'essayer. Pour l'installer ensuite sur le disque interne : <code>install image disk</code>, la configuration faite en live suit.</p>
+<p>Mises à jour d'un switch en image compacte : <code>install update</code> pour TL-SwitchOS et les correctifs Debian, <code>install image &lt;fichier .tlsi&gt;</code> pour un nouveau système (avec retour automatique à l'ancien s'il ne démarre pas).</p>
 
 <h2>Sur une Debian déjà installée</h2>
 <p>Installe une Debian 13 minimale (amd64, sans bureau, avec le serveur SSH si tu veux), puis en root :</p>

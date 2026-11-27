@@ -15,6 +15,12 @@ Default: 1
 Description: VLAN de gestion :
  VLAN qui porte l'adresse IP d'administration du switch. Au départ, tous les ports sont en access dans ce VLAN. Mets 1 si tu ne sais pas.
 
+Template: tlswitch/vlan_tague
+Type: boolean
+Default: false
+Description: Le VLAN ${VLAN} arrive-t-il TAGUÉ sur le port branché ?
+ Réponds Oui si le port en face (ton switch ou routeur) est un trunk qui envoie le VLAN ${VLAN} tagué (802.1Q). L'installation passera alors par le VLAN ${VLAN}, et ce port restera un trunk du VLAN ${VLAN} sur le switch installé. Réponds Non si le port en face est en access dans le VLAN ${VLAN} (non tagué).
+
 Template: tlswitch/ip
 Type: string
 Default: dhcp

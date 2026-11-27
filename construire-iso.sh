@@ -212,7 +212,7 @@ if [ -n "$IPXE" ]; then
 # TL-SwitchOS $VERSION - installation par le reseau
 set tls $IPXE
 :menu
-menu TL-SwitchOS $VERSION - TECH-LINUX
+menu TL-SwitchOS $VERSION
 item --gap -- Installation (le disque est demande, rien n'est efface sans confirmation)
 item texte    Installer TL-SwitchOS $VERSION
 item graph    Installer TL-SwitchOS $VERSION (mode graphique)

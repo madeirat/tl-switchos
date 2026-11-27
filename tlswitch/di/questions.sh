@@ -38,6 +38,21 @@ while :; do ask tlswitch/hostname; H="$RET"
 while :; do ask tlswitch/mgmt_vlan; V="$RET"
   echo "$V" | grep -Eq '^[0-9]{1,4}$' && [ "$V" -ge 1 ] && [ "$V" -le 4094 ] && break
   err "Le VLAN doit être un nombre entre 1 et 4094."; done
+# VLAN de gestion TAGUE sur le port branche (trunk) : l'installateur Debian doit taguer
+# lui aussi, sinon il prend une adresse dans un autre VLAN (ou aucune) et les depots
+# Debian sont injoignables. Le port deviendra un trunk dans la config du switch.
+TAG=false
+if [ "$V" != 1 ]; then
+  db_subst tlswitch/vlan_tague VLAN "$V"
+  db_fset tlswitch/vlan_tague seen false; db_input critical tlswitch/vlan_tague || true; db_go || true
+  db_get tlswitch/vlan_tague; TAG="$RET"
+fi
+if [ "$TAG" = true ]; then
+  pre netcfg/use_vlan true
+  pre netcfg/vlan_id "$V"
+else
+  pre netcfg/use_vlan false
+fi
 # l'adresse IP n'est PAS demandee ici : c'est l'etape reseau de Debian qui la configure
 # (DHCP, ou saisie manuelle si pas de DHCP), et late.sh la reprend pour le switch.
 # pas de mot de passe ici : le switch demarre avec admin / admin provisoire (affiche sur la

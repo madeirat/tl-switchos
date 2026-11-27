@@ -13,3 +13,7 @@ __pycache__/
 *.deb.sha256
 tlswitch/depot-apt.conf
 tlswitch/depot-apt.gpg
+*.img
+*.img.xz
+*.tlsi
+*.sha256
